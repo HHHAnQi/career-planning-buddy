@@ -260,3 +260,6 @@ service-account*.json
 *.swo
 *~
 output/
+
+# Rubric annotation working files (CSV) — golden labels live in the JSONL
+backend/evals/annotations/*.csv
