@@ -20,7 +20,7 @@ from app.agent.errors import AgentError
 from app.core.database import session_transaction
 from app.models.rag_documents import RagDocumentChunk
 from app.providers.embedding import EmbeddingProvider
-from app.providers.rerank import RerankProvider
+from app.providers.rerank import MockRerankProvider, RerankProvider
 from app.rag.chunking import chunk_document, chunk_hash
 from app.repositories.rag_documents import RagDocumentRepository
 from app.tools.sanitization import sanitize_untrusted_text
@@ -165,3 +165,36 @@ def sanitized_snippet(content: str, limit: int = 1200) -> str:
     """Untrusted document content is sanitized before entering evidence."""
 
     return sanitize_untrusted_text(content, limit)
+
+
+async def ingest_untrusted_document(
+    session: AsyncSession,
+    *,
+    embedding_provider: EmbeddingProvider,
+    user_id: UUID,
+    doc_kind: str,
+    source_id: UUID,
+    title: str,
+    text: str,
+) -> int:
+    """Best-effort post-creation ingest hook (no rerank needed for ingest).
+
+    Callers wrap this in try/except: ingestion must never fail the
+    resume/JD creation that triggered it — the document stays searchable
+    lexically even when embedding fails, and a later re-ingest is
+    idempotent.
+    """
+
+    service = RagDocumentService(
+        session,
+        embedding_provider=embedding_provider,
+        rerank_provider=MockRerankProvider(),
+        min_rerank_score=0.0,
+    )
+    return await service.ingest_document(
+        user_id=user_id,
+        doc_kind=doc_kind,
+        source_id=source_id,
+        title=title,
+        text=text,
+    )
