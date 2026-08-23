@@ -76,23 +76,30 @@ class DevTraceRepository:
         )
         return list(rows)
 
-    async def usage_provider_calls(self, *, since: datetime) -> list[tuple[str, str, int, int]]:
-        """(provider_kind, status, call_count, avg_latency_ms) groups."""
+    async def usage_provider_calls(
+        self, *, since: datetime
+    ) -> list[tuple[str, str, int, int]]:
+        """(provider_kind, status, call_count, latency_ms_total) groups.
+
+        The exact ``sum`` (not a truncated ``avg``) is returned so the
+        service can weight buckets without integer-truncation drift —
+        averaging first would turn a 0.96 ms bucket into 0.
+        """
 
         rows = await self._session.execute(
             select(
                 ProviderCall.provider_kind,
                 ProviderCall.status,
                 func.count().label("call_count"),
-                func.avg(ProviderCall.latency_ms).label("avg_latency_ms"),
+                func.sum(ProviderCall.latency_ms).label("latency_ms_total"),
             )
             .where(ProviderCall.created_at >= since)
             .group_by(ProviderCall.provider_kind, ProviderCall.status)
             .order_by(ProviderCall.provider_kind, ProviderCall.status)
         )
         return [
-            (kind, status, int(count), int(avg_latency or 0))
-            for kind, status, count, avg_latency in rows
+            (kind, status, int(count), int(total or 0))
+            for kind, status, count, total in rows
         ]
 
     async def repair_prompt_version_counts(self, *, since: datetime) -> list[tuple[str, int]]:

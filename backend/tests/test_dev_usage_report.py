@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -206,11 +207,14 @@ async def test_usage_report_aggregates_exact_deltas(
     new_llm = _kind(body, "llm")
     assert new_llm["call_count"] - base_llm["call_count"] == 2
     assert new_llm["error_count"] - base_llm["error_count"] == 1
-    base_llm_total = base_llm["call_count"] * base_llm["avg_latency_ms"]
-    # Baseline averages are floored in the report, so the recomputed total
-    # carries up to one unit of rounding error per call bucket.
-    expected_llm_avg = (base_llm_total + 200 + 600) / new_llm["call_count"]
-    assert abs(new_llm["avg_latency_ms"] - expected_llm_avg) <= 1
+    base_rows = await db_session.execute(
+        select(ProviderCall.latency_ms).where(ProviderCall.provider_kind == "llm")
+    )
+    base_llm_total = sum(int(row[0]) for row in base_rows) - 200 - 600
+    expected_llm_avg = (base_llm_total + 200 + 600) // new_llm["call_count"]
+    # The report now aggregates exact per-bucket latency sums, so the
+    # weighted average is exact (integer division only).
+    assert new_llm["avg_latency_ms"] == expected_llm_avg
 
     base_search = _kind(baseline, "search")
     new_search = _kind(body, "search")

@@ -120,14 +120,14 @@ class DevTraceService:
             daily.setdefault(run.created_at.astimezone(UTC).date(), []).append(run)
 
         provider_kinds: dict[str, dict[str, int]] = {}
-        for kind, call_status, count, avg_latency in provider_rows:
+        for kind, call_status, count, latency_total in provider_rows:
             bucket = provider_kinds.setdefault(
                 kind, {"call_count": 0, "error_count": 0, "latency_total": 0}
             )
             bucket["call_count"] += count
             if call_status == "error":
                 bucket["error_count"] += count
-            bucket["latency_total"] += count * avg_latency
+            bucket["latency_total"] += latency_total
 
         return UsageReportResponse(
             window_days=days,
