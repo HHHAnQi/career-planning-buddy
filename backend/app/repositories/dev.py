@@ -1,11 +1,13 @@
 """Developer-only cross-user Trace queries."""
 
+from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_run import AgentEvent, AgentRun, AgentStep, ToolCall
+from app.models.provider_call import ProviderCall
 
 
 class DevTraceRepository:
@@ -63,3 +65,32 @@ class DevTraceRepository:
             )
         )
         return steps, tools, events
+
+    async def usage_runs(self, *, since: datetime) -> list[AgentRun]:
+        """All Runs created inside the reporting window, oldest first."""
+
+        rows = await self._session.scalars(
+            select(AgentRun)
+            .where(AgentRun.created_at >= since)
+            .order_by(AgentRun.created_at, AgentRun.id)
+        )
+        return list(rows)
+
+    async def usage_provider_calls(self, *, since: datetime) -> list[tuple[str, str, int, int]]:
+        """(provider_kind, status, call_count, avg_latency_ms) groups."""
+
+        rows = await self._session.execute(
+            select(
+                ProviderCall.provider_kind,
+                ProviderCall.status,
+                func.count().label("call_count"),
+                func.avg(ProviderCall.latency_ms).label("avg_latency_ms"),
+            )
+            .where(ProviderCall.created_at >= since)
+            .group_by(ProviderCall.provider_kind, ProviderCall.status)
+            .order_by(ProviderCall.provider_kind, ProviderCall.status)
+        )
+        return [
+            (kind, status, int(count), int(avg_latency or 0))
+            for kind, status, count, avg_latency in rows
+        ]

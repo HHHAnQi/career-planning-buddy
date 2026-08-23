@@ -7994,6 +7994,228 @@
         "title": "TurnAnalysis",
         "type": "object"
       },
+      "UsageDailyPoint": {
+        "additionalProperties": false,
+        "description": "One UTC day of run activity for trend charts.",
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "run_count": {
+            "title": "Run Count",
+            "type": "integer"
+          },
+          "total_cost_cny": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Cost Cny",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "run_count",
+          "total_cost_cny"
+        ],
+        "title": "UsageDailyPoint",
+        "type": "object"
+      },
+      "UsageGraphBreakdown": {
+        "additionalProperties": false,
+        "description": "Per (graph_version, model_id) slice of the same window.",
+        "properties": {
+          "avg_latency_ms": {
+            "title": "Avg Latency Ms",
+            "type": "integer"
+          },
+          "graph_version": {
+            "title": "Graph Version",
+            "type": "string"
+          },
+          "model_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Id"
+          },
+          "run_count": {
+            "title": "Run Count",
+            "type": "integer"
+          },
+          "total_cost_cny": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Cost Cny",
+            "type": "string"
+          }
+        },
+        "required": [
+          "graph_version",
+          "model_id",
+          "run_count",
+          "total_cost_cny",
+          "avg_latency_ms"
+        ],
+        "title": "UsageGraphBreakdown",
+        "type": "object"
+      },
+      "UsageProviderKind": {
+        "additionalProperties": false,
+        "description": "Provider-call health per provider kind in the window.",
+        "properties": {
+          "avg_latency_ms": {
+            "title": "Avg Latency Ms",
+            "type": "integer"
+          },
+          "call_count": {
+            "title": "Call Count",
+            "type": "integer"
+          },
+          "error_count": {
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "provider_kind": {
+            "title": "Provider Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_kind",
+          "call_count",
+          "error_count",
+          "avg_latency_ms"
+        ],
+        "title": "UsageProviderKind",
+        "type": "object"
+      },
+      "UsageReportResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/UsageDailyPoint"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "graphs": {
+            "items": {
+              "$ref": "#/components/schemas/UsageGraphBreakdown"
+            },
+            "title": "Graphs",
+            "type": "array"
+          },
+          "provider_kinds": {
+            "items": {
+              "$ref": "#/components/schemas/UsageProviderKind"
+            },
+            "title": "Provider Kinds",
+            "type": "array"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageTotals"
+          },
+          "window_days": {
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_days",
+          "generated_at",
+          "totals",
+          "graphs",
+          "daily",
+          "provider_kinds"
+        ],
+        "title": "UsageReportResponse",
+        "type": "object"
+      },
+      "UsageTotals": {
+        "additionalProperties": false,
+        "description": "Window-wide run aggregates for cost and latency reporting.",
+        "properties": {
+          "avg_cost_per_run_cny": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Avg Cost Per Run Cny",
+            "type": "string"
+          },
+          "completed_count": {
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "degraded_count": {
+            "title": "Degraded Count",
+            "type": "integer"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "fallback_count": {
+            "title": "Fallback Count",
+            "type": "integer"
+          },
+          "latency_max_ms": {
+            "default": 0,
+            "title": "Latency Max Ms",
+            "type": "integer"
+          },
+          "latency_p50_ms": {
+            "default": 0,
+            "title": "Latency P50 Ms",
+            "type": "integer"
+          },
+          "latency_p95_ms": {
+            "default": 0,
+            "title": "Latency P95 Ms",
+            "type": "integer"
+          },
+          "run_count": {
+            "title": "Run Count",
+            "type": "integer"
+          },
+          "total_cost_cny": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Cost Cny",
+            "type": "string"
+          },
+          "total_tokens_in": {
+            "default": 0,
+            "title": "Total Tokens In",
+            "type": "integer"
+          },
+          "total_tokens_out": {
+            "default": 0,
+            "title": "Total Tokens Out",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_count",
+          "completed_count",
+          "degraded_count",
+          "failed_count",
+          "fallback_count"
+        ],
+        "title": "UsageTotals",
+        "type": "object"
+      },
       "UserSummary": {
         "additionalProperties": false,
         "description": "Public user fields safe for client identity restoration.",
@@ -8998,6 +9220,57 @@
           }
         ],
         "summary": "Get Replay Diff",
+        "tags": [
+          "developer"
+        ]
+      }
+    },
+    "/api/v1/dev/usage-report": {
+      "get": {
+        "description": "Cost, latency, and provider-health aggregates over the window.",
+        "operationId": "get_usage_report_api_v1_dev_usage_report_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 365,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Usage Report",
         "tags": [
           "developer"
         ]

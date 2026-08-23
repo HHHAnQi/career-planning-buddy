@@ -24,6 +24,10 @@ BAD_CASE_ROOT = EVAL_ROOT / "bad_cases"
 def _runtime_failure_records(report: ExperimentReport) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for trial in report.trials:
+        if trial.status == "cancelled":
+            # "cancelled" is user-intentional (its own CaseStat bucket) and
+            # not a defect worth reproducing.
+            continue
         if trial.status == "completed" and trial.error_code is None:
             continue
         records.append(

@@ -1,6 +1,7 @@
 """Developer Trace inspection and isolated offline Replay use cases."""
 
-from datetime import UTC, datetime, timedelta
+import math
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from http import HTTPStatus
@@ -40,9 +41,23 @@ from app.schemas.dev import (
     ReplayDiff,
     ReplayResponse,
     TerminalInvariant,
+    UsageDailyPoint,
+    UsageGraphBreakdown,
+    UsageProviderKind,
+    UsageReportResponse,
+    UsageTotals,
 )
 
 TERMINAL_EVENTS = {"run.completed", "run.degraded", "run.failed", "run.cancelled"}
+
+
+def _percentile(sorted_values: list[int], fraction: float) -> int:
+    """Nearest-rank percentile over an already-sorted list; 0 when empty."""
+
+    if not sorted_values:
+        return 0
+    rank = max(1, math.ceil(fraction * len(sorted_values)))
+    return sorted_values[rank - 1]
 
 
 class DevTraceService:
@@ -79,6 +94,92 @@ class DevTraceService:
         return DevRunListResponse(
             items=[self._summary(row) for row in rows],
             next_cursor=rows[-1].id if has_more and rows else None,
+        )
+
+    async def usage_report(self, *, days: int) -> UsageReportResponse:
+        """Aggregate cost, latency, and provider health over the window."""
+
+        since = datetime.now(UTC) - timedelta(days=days)
+        async with session_transaction(self._session):
+            runs = await self._repo.usage_runs(since=since)
+            provider_rows = await self._repo.usage_provider_calls(since=since)
+
+        terminal_runs = [run for run in runs if run.status in {"completed", "degraded", "failed"}]
+        latencies = sorted(
+            run.total_latency_ms for run in terminal_runs if run.total_latency_ms > 0
+        )
+        total_cost = sum((run.total_cost_cny for run in runs), Decimal("0"))
+
+        graphs: dict[tuple[str, str | None], list[AgentRun]] = {}
+        daily: dict[date, list[AgentRun]] = {}
+        for run in runs:
+            graphs.setdefault((run.graph_version, run.model_id), []).append(run)
+            daily.setdefault(run.created_at.astimezone(UTC).date(), []).append(run)
+
+        provider_kinds: dict[str, dict[str, int]] = {}
+        for kind, call_status, count, avg_latency in provider_rows:
+            bucket = provider_kinds.setdefault(
+                kind, {"call_count": 0, "error_count": 0, "latency_total": 0}
+            )
+            bucket["call_count"] += count
+            if call_status == "error":
+                bucket["error_count"] += count
+            bucket["latency_total"] += count * avg_latency
+
+        return UsageReportResponse(
+            window_days=days,
+            generated_at=datetime.now(UTC),
+            totals=UsageTotals(
+                run_count=len(runs),
+                completed_count=sum(1 for run in runs if run.status == "completed"),
+                degraded_count=sum(1 for run in runs if run.status == "degraded"),
+                failed_count=sum(1 for run in runs if run.status == "failed"),
+                fallback_count=sum(1 for run in runs if run.fallback_reason is not None),
+                total_cost_cny=total_cost,
+                total_tokens_in=sum(run.total_tokens_in for run in runs),
+                total_tokens_out=sum(run.total_tokens_out for run in runs),
+                avg_cost_per_run_cny=(
+                    (total_cost / len(runs)).quantize(Decimal("0.000001")) if runs else Decimal("0")
+                ),
+                latency_p50_ms=_percentile(latencies, 0.50),
+                latency_p95_ms=_percentile(latencies, 0.95),
+                latency_max_ms=latencies[-1] if latencies else 0,
+            ),
+            graphs=[
+                UsageGraphBreakdown(
+                    graph_version=graph_version,
+                    model_id=model_id,
+                    run_count=len(group),
+                    total_cost_cny=sum((run.total_cost_cny for run in group), Decimal("0")),
+                    avg_latency_ms=(
+                        sum(run.total_latency_ms for run in group) // len(group) if group else 0
+                    ),
+                )
+                for (graph_version, model_id), group in sorted(
+                    graphs.items(), key=lambda item: (item[0][0], item[0][1] or "")
+                )
+            ],
+            daily=[
+                UsageDailyPoint(
+                    date=day,
+                    run_count=len(group),
+                    total_cost_cny=sum((run.total_cost_cny for run in group), Decimal("0")),
+                )
+                for day, group in sorted(daily.items())
+            ],
+            provider_kinds=[
+                UsageProviderKind(
+                    provider_kind=kind,
+                    call_count=bucket["call_count"],
+                    error_count=bucket["error_count"],
+                    avg_latency_ms=(
+                        bucket["latency_total"] // bucket["call_count"]
+                        if bucket["call_count"]
+                        else 0
+                    ),
+                )
+                for kind, bucket in sorted(provider_kinds.items())
+            ],
         )
 
     async def get_run(self, run_id: UUID) -> DevRunDetail:
@@ -400,9 +501,7 @@ class DevTraceService:
             if mode == "candidate_comparison":
                 if self._settings is None:
                     raise RuntimeError("candidate comparison requires Runtime settings")
-                current_config = SnapshotService.build_resume_optimization_config(
-                    self._settings
-                )
+                current_config = SnapshotService.build_resume_optimization_config(self._settings)
                 current_bundle = await get_or_create_runtime_bundle(
                     self._session,
                     build_resume_runtime_bundle(self._settings, current_config),
@@ -411,8 +510,7 @@ class DevTraceService:
                     raise AppError(
                         code="REPLAY_RUNTIME_BUNDLE_NOT_ACTIVE",
                         message=(
-                            "candidate comparison target must be the active server "
-                            "Runtime Bundle"
+                            "candidate comparison target must be the active server Runtime Bundle"
                         ),
                         status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
                     )
@@ -451,8 +549,7 @@ class DevTraceService:
                 graph_version=source.graph_version,
                 input_snapshot_json=source.input_snapshot_json,
                 config_snapshot_json=config,
-                deadline_at=datetime.now(UTC)
-                + timedelta(seconds=int(deadline_seconds)),
+                deadline_at=datetime.now(UTC) + timedelta(seconds=int(deadline_seconds)),
             )
             self._session.add(replay)
             await self._session.flush()
@@ -507,12 +604,10 @@ class DevTraceService:
         source_context = source_assessment.context_manifest_json if source_assessment else None
         replay_context = replay_assessment.context_manifest_json if replay_assessment else None
         source_claims = (
-            self._canonical_claims(source_assessment.findings_json)
-            if source_assessment else None
+            self._canonical_claims(source_assessment.findings_json) if source_assessment else None
         )
         replay_claims = (
-            self._canonical_claims(replay_assessment.findings_json)
-            if replay_assessment else None
+            self._canonical_claims(replay_assessment.findings_json) if replay_assessment else None
         )
         source_tool_payload = [
             {"name": item.tool_name, "args": item.args_json, "result": item.result_json}

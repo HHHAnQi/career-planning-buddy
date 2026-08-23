@@ -26,6 +26,28 @@ Case → Experiment → Trial → Run → Grade → Report
 
 The backend is Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2 Async and Alembic. The frontend is React, strict TypeScript, Vite, React Router and TanStack Query. The MVP has no Redis, Celery, MCP, multi-agent framework, microservices or object storage.
 
+## HTTP boundary guard
+
+Every inbound request passes one guard middleware that records metrics and enforces per-identity rate limits (`docs/architecture/http-guard-and-metrics.md`):
+
+- Rate limiting: fixed-window counter keyed by client IP plus Authorization hash (each authenticated user gets an independent budget). Exceeding the budget returns `429` with `Retry-After`. Health, metrics, docs and `OPTIONS` preflights are exempt. `RATE_LIMIT_PER_MINUTE=0` disables it (Compose default: 120).
+- Metrics: `GET /metrics` exposes Prometheus text format — request totals with UUID/id-normalized path labels, latency count/sum, in-flight gauge and rate-limit rejections. In-process registry, no new dependency.
+- Usage report: `GET /api/v1/dev/usage-report?days=30` (dev role) aggregates run counts by status, fallback rate, total/average cost in CNY, tokens, latency P50/P95/max, per-graph and per-day breakdowns, and provider-call health — all from existing `agent_runs` / `provider_calls` data with no extra instrumentation.
+
+## Measured quality (deterministic mock evals)
+
+Frozen datasets, deterministic graders, CI hard gates. Current numbers on the default Mock provider:
+
+| Evaluation | Dataset | Result |
+|---|---|---|
+| Intent routing (rule router `intent-rule-v3`) | `intent-routing-v1` (23 cases) | 23/23 = 100% |
+| Stage 5 planning/repair/replan/safety | `stage5-v1` (30 cases, 11 graders) | 30/30 = 100% |
+| Stage 5 via Eval V2 hard gates | `stage5-v1`, 1 trial/case | hard-gate pass fraction 1.0, first-attempt success 1.0 |
+| Stage 6 memory/context selection | `stage6-memory-context-v1` (12 cases) | 12/12 = 100% |
+| Regression suite | backend tests | 730+ passing (schema/service/repository/API/runtime/eval) |
+
+Failed cases are exported automatically to `backend/evals/bad_cases/` as structured JSONL (runtime failures and hard-gate misses; user-cancelled trials are excluded) for reproduction and root-causing.
+
 ## Product flow and memory boundaries
 
 The user flow is Guest Login → Profile → Plan → Today Tasks → Task feedback → Review → Replan → Memories → Plan history/evidence. Runs persist snapshots, steps, tool calls and SSE events before streaming; each Run has exactly one terminal event.
@@ -132,5 +154,7 @@ Useful endpoints:
 - API docs: `http://127.0.0.1:8000/docs`
 - OpenAPI: `http://127.0.0.1:8000/openapi.json`
 - Health: `GET /health`
+- Prometheus metrics: `GET /metrics`
+- Dev usage report (dev role): `GET /api/v1/dev/usage-report`
 
 The current architecture and limits are maintained in `docs/architecture/current-system-overview.md`; release evidence is in `docs/review/v1-release-verification-2026-08-09.md`.

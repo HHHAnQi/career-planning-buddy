@@ -127,3 +127,9 @@ def test_file_name_is_experiment_id(bad_case_root) -> None:
     path = write_bad_cases(report)
     assert path is not None
     assert path.name == f"{report.experiment_id}.jsonl"
+
+
+def test_cancelled_trial_is_not_a_bad_case(bad_case_root) -> None:
+    report = _report(trials=[_trial(status="cancelled", error_code="RUN_CANCELLED")])
+    assert write_bad_cases(report) is None
+    assert not bad_case_root.exists()
