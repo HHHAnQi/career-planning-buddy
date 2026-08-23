@@ -177,6 +177,12 @@ export function useRunEventStream(runId: string | undefined): RunStreamState {
                 const message = event.data.message;
                 if (typeof message === "string") setProgressMessage(message);
               }
+              if (event.type === "llm.stream.progress" && isRecord(event.data)) {
+                const chars = event.data.cumulative_chars;
+                if (typeof chars === "number") {
+                  setProgressMessage(`模型生成中 · 已输出 ${chars} 字符`);
+                }
+              }
               if (event.type === "plan.ready") invalidatePlanState();
               if (event.type.startsWith("interview.")) {
                 void queryClient.invalidateQueries({ queryKey: ["interviews"] });

@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from datetime import timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 from pydantic import ValidationError
@@ -25,6 +25,7 @@ from app.providers.llm_contracts import (
     LLMToolDefinition,
 )
 from app.providers.llm_profiles import model_for_operation, resolve_provider_profile
+from app.providers.streaming import current_stream_delta_sink
 from app.schemas.agent_runs import (
     AgentTurnResponse,
     EvidenceCatalogItem,
@@ -103,6 +104,7 @@ class OpenAICompatiblePlanningProvider:
         provider_name: str = "auto",
         reasoning: str = "off",
         client: LLMClient | None = None,
+        streaming_enabled: bool = False,
     ) -> None:
         if not api_key or not base_url or not model:
             raise ProviderConfigurationError(
@@ -111,6 +113,7 @@ class OpenAICompatiblePlanningProvider:
         self._model = model
         self._max_output_tokens = max_output_tokens
         self._reasoning = "off" if reasoning == "off" else "auto"
+        self._streaming_enabled = streaming_enabled
         self._owns_client = client is None
         self._client = client or OpenAIChatLLMClient(
             api_key=api_key,
@@ -122,6 +125,22 @@ class OpenAICompatiblePlanningProvider:
             timeout_seconds=timeout_seconds,
             transport=transport,
         )
+
+    async def _complete_request(self, request: LLMRequest) -> LLMResponse:
+        """Complete via SSE streaming when enabled, forwarding text deltas.
+
+        Streaming preserves the non-streaming contract: the assembled
+        ``LLMResponse`` is identical, so graph validation, repair, and the
+        eval harness are unaffected. A sink bound by the graph (ContextVar)
+        receives each delta; without one, deltas are simply discarded.
+        """
+        streamed: Any = getattr(self._client, "complete_streamed", None)
+        if self._streaming_enabled and callable(streamed):
+            response: LLMResponse = await streamed(
+                request, on_delta=current_stream_delta_sink()
+            )
+            return response
+        return await self._client.complete(request)
 
     async def generate_plan(
         self,
@@ -174,7 +193,7 @@ class OpenAICompatiblePlanningProvider:
             evidence_catalog=evidence_catalog,
         )
         tools = available_tools if available_tools and not force_final else []
-        response = await self._client.complete(
+        response = await self._complete_request(
             self._request(
                 operation="planning",
                 messages=messages,
@@ -257,7 +276,7 @@ class OpenAICompatiblePlanningProvider:
         *,
         operation: str,
     ) -> Mapping[str, object]:
-        response = await self._client.complete(
+        response = await self._complete_request(
             self._request(operation=operation, messages=messages)
         )
         usage = self._provider_usage(response)
@@ -1011,6 +1030,7 @@ def build_planning_provider(
         provider_name=settings.llm_provider_name,
         reasoning=settings.llm_planning_reasoning,
         client=client,
+        streaming_enabled=settings.llm_streaming_enabled,
     )
     if agent_variant == "direct_llm_v1":
         return DirectLLMPlanningProvider(provider)

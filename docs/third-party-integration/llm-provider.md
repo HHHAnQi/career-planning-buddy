@@ -78,3 +78,24 @@ Stage 2 必须先用确定性 Mock 输出跑通：
 - timeout/cancel。
 
 真实模型不得成为工程骨架、状态机和契约测试的前置条件。
+
+## Wire-level 流式输出（LLM_STREAMING_ENABLED）
+
+`LLM_STREAMING_ENABLED=true` 时，openai_compatible 规划调用走真正的 SSE 流式传输（`stream: true` + `stream_options.include_usage`），默认关闭；Mock Provider 永远不流式，评测确定性不受影响。
+
+分层职责：
+
+| 层 | 行为 |
+|---|---|
+| `OpenAIChatLLMClient.complete_streamed` | 解析 OpenAI 兼容 SSE 分片：content delta 逐段回调、tool_calls 分片按 index 拼装、末块 usage 归一化；错误映射与遥测与非流式完全一致 |
+| `OpenAICompatiblePlanningProvider._complete_request` | 流式开关生效处；组装后的 `LLMResponse` 与非流式逐字段一致，因此图校验、修复、评测回放均不感知差异 |
+| `app/providers/streaming.py` | ContextVar sink：图绑定、Provider 读取，`PlanningProvider` 协议与四个实现零签名变更 |
+| `StreamProgressPublisher`（`app/harness/stream_progress.py`） | 每次调用最多每 0.5s 追加一条持久 `llm.stream.progress` 事件（仅计数，不含原始文本），SSE 轮询器即可向前端推送实时进度；断线/终态时自我禁用而不中断流 |
+| 步级指标 | `AgentStep.trace_data.llm_stream`：chunk 数、字符数、首 token 延迟（ms）、进度事件数——first-token latency 是流式的核心收益指标 |
+
+设计约束：
+
+- **响应语义不变**：流式只改变传输层。任何 Grader、快照或回放都不应感知差异。
+- **原始分片不落库**：`agent_events` 只保存计数，防止部分 JSON 与大 payload 污染事实源。
+- **进度是尽力而为**：事件写入失败（Run 已终态、数据库瞬断）只禁用发布器，绝不打断 LLM 流。
+- 前端把 `llm.stream.progress` 映射为 `progressMessage`（“模型生成中 · 已输出 N 字符”），复用既有 TodayPage 进度展示。

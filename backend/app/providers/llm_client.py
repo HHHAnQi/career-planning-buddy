@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from hashlib import sha256
 from time import monotonic
 from typing import Protocol
@@ -39,6 +39,10 @@ class LLMClient(Protocol):
     async def complete(self, request: LLMRequest) -> LLMResponse: ...
 
     async def aclose(self) -> None: ...
+
+
+# Async receiver of one streamed text delta (wire-level token streaming).
+StreamDeltaCallback = Callable[[str], Awaitable[None]]
 
 
 class LLMTelemetrySink(Protocol):
@@ -115,6 +119,144 @@ class OpenAIChatLLMClient:
         except (TypeError, ValueError) as exc:
             error = ProviderUnavailableError(
                 "LLM provider returned an invalid response", retryable=False
+            )
+            self._emit_failure(request, started, error)
+            raise error from exc
+        self._emit_success(request, normalized)
+        return normalized
+
+    async def complete_streamed(
+        self,
+        request: LLMRequest,
+        *,
+        on_delta: StreamDeltaCallback | None = None,
+    ) -> LLMResponse:
+        """Stream one Chat Completion over SSE and return the assembled response.
+
+        Same contract as ``complete``: normalized ``LLMResponse`` (accumulated
+        content, assembled tool calls, usage), typed errors, and telemetry.
+        ``on_delta`` receives every content text fragment as it arrives; it is
+        never given tool-call or reasoning fragments.
+        """
+        started = monotonic()
+        try:
+            body = {
+                **self._request_body(request),
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+            content_parts: list[str] = []
+            tool_fragments: dict[int, dict[str, str]] = {}
+            usage_raw: object = None
+            finish_reason: str | None = None
+            model_id: str | None = None
+            response_id: str | None = None
+            async with self._client.stream("POST", self._endpoint, json=body) as response:
+                self._raise_for_status(response)
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data:
+                        continue
+                    if data == "[DONE]":
+                        break
+                    chunk: object = json.loads(data)
+                    if not isinstance(chunk, Mapping):
+                        raise ValueError("stream chunk is not an object")
+                    if usage_raw is None:
+                        usage_raw = chunk.get("usage")
+                    model_value = chunk.get("model")
+                    if model_id is None and isinstance(model_value, str):
+                        model_id = model_value
+                    id_value = chunk.get("id")
+                    if response_id is None and isinstance(id_value, str):
+                        response_id = id_value
+                    choices = chunk.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        continue
+                    first = choices[0]
+                    if not isinstance(first, Mapping):
+                        continue
+                    reason = first.get("finish_reason")
+                    if isinstance(reason, str):
+                        finish_reason = reason
+                    delta = first.get("delta")
+                    if not isinstance(delta, Mapping):
+                        continue
+                    text = delta.get("content")
+                    if isinstance(text, str) and text:
+                        content_parts.append(text)
+                        if on_delta is not None:
+                            await on_delta(text)
+                    calls = delta.get("tool_calls")
+                    if isinstance(calls, list):
+                        for call in calls:
+                            if not isinstance(call, Mapping):
+                                continue
+                            index = call.get("index")
+                            if not isinstance(index, int):
+                                continue
+                            fragment = tool_fragments.setdefault(
+                                index, {"id": "", "name": "", "arguments": ""}
+                            )
+                            call_id = call.get("id")
+                            if isinstance(call_id, str):
+                                fragment["id"] += call_id
+                            function = call.get("function")
+                            if isinstance(function, Mapping):
+                                name = function.get("name")
+                                if isinstance(name, str):
+                                    fragment["name"] += name
+                                arguments = function.get("arguments")
+                                if isinstance(arguments, str):
+                                    fragment["arguments"] += arguments
+            accumulated = "".join(content_parts)
+            content = accumulated.strip() or None
+            synthesized_calls: list[Mapping[str, object]] = [
+                {
+                    "id": fragment["id"] or None,
+                    "function": {
+                        "name": fragment["name"],
+                        "arguments": fragment["arguments"],
+                    },
+                }
+                for _, fragment in sorted(tool_fragments.items())
+            ]
+            tool_calls = self._tool_calls(synthesized_calls) if synthesized_calls else []
+            if content is None and not tool_calls:
+                raise ValueError("response has neither content nor tool calls")
+            normalized = LLMResponse(
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+                provider_id=self.provider_id,
+                model_id=model_id or request.model,
+                request_id=response_id,
+                usage=self._usage(usage_raw),
+                latency_ms=int((monotonic() - started) * 1000),
+                # Streaming hashes the assembled content (the raw SSE body is
+                # never fully buffered); stable for the same token sequence.
+                raw_output_hash=sha256(accumulated.encode("utf-8")).hexdigest(),
+            )
+        except httpx.TimeoutException as exc:
+            error: AgentError = ProviderTimeoutError(
+                "LLM provider stream timed out", retryable=True
+            )
+            self._emit_failure(request, started, error)
+            raise error from exc
+        except httpx.RequestError as exc:
+            error = ProviderUnavailableError(
+                "LLM provider could not be reached", retryable=True
+            )
+            self._emit_failure(request, started, error)
+            raise error from exc
+        except AgentError as exc:
+            self._emit_failure(request, started, exc)
+            raise
+        except (TypeError, ValueError) as exc:
+            error = ProviderUnavailableError(
+                "LLM provider returned an invalid stream", retryable=False
             )
             self._emit_failure(request, started, error)
             raise error from exc

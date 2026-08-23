@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     llm_goal_understanding_reasoning: Literal["off", "auto"] = "off"
     llm_evidence_distillation_reasoning: Literal["off", "auto"] = "off"
     llm_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    # Wire-level SSE streaming for openai_compatible providers. Off by
+    # default: Mock/deterministic paths never stream, and streaming only
+    # changes transport, never response semantics.
+    llm_streaming_enabled: bool = False
     asr_provider: Literal["mock", "openai_compatible"] = "mock"
     asr_api_key: SecretStr | None = Field(default=None, min_length=1)
     asr_base_url: AnyHttpUrl | None = None

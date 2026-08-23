@@ -31,12 +31,14 @@ from app.core.time import product_today
 from app.harness.budget import BudgetGuard
 from app.harness.evidence import build_evidence_visibility
 from app.harness.snapshots import SnapshotService
+from app.harness.stream_progress import StreamProgressPublisher
 from app.models.agent_run import AgentRun
 from app.models.plan import Plan
 from app.models.review import Review
 from app.models.user_profile import UserProfile
 from app.providers.embedding import EmbeddingProvider, MockEmbeddingProvider
 from app.providers.llm import PlanningProvider
+from app.providers.streaming import bind_stream_delta_sink
 from app.repositories.evidence import EvidenceRepository
 from app.repositories.interviews import InterviewRepository
 from app.repositories.plans import PlanRepository
@@ -667,7 +669,18 @@ class FixedPlanningGraph:
         tool_round = state.get("tool_round", 0)
         tool_call_count = state.get("tool_call_count", 0)
         total_usage: ProviderUsage | None = None
+        stream_summaries: list[dict[str, object]] = []
         prompt_version = state["runtime_config"].prompt_versions["career_planning"]
+
+        def _step_telemetry(visibility: EvidenceVisibility) -> NodeTelemetry:
+            # Every return path below follows at least one provider call,
+            # so total_usage is always bound by the time this runs.
+            assert total_usage is not None
+            telemetry = self._telemetry(total_usage, prompt_version, visibility)
+            if stream_summaries:
+                telemetry.trace_data["llm_stream"] = stream_summaries
+            return telemetry
+
         for turn_index in range(3):
             force_final = (
                 tool_round >= state["runtime_config"].max_tool_rounds
@@ -686,22 +699,33 @@ class FixedPlanningGraph:
             # 当本轮没有任何 Tool 时，走更轻量的 generate_plan prompt 路径
             # （ProviderPlanResponse schema）。带 Tool 时才使用完整的 agent-turn prompt。
             using_plan_path = not available_tools
-            if available_tools:
-                raw = await self._provider.generate_agent_turn(
-                    message=state["request"].message,
-                    context=context,
-                    replan_mode=mode,
-                    available_tools=available_tools,
-                    evidence_catalog=visible_catalog,
-                    force_final=force_final,
-                )
-            else:
-                raw = await self._provider.generate_plan(
-                    message=state["request"].message,
-                    context=context,
-                    replan_mode=mode,
-                    evidence_catalog=visible_catalog,
-                )
+            # Wire-level streaming: bind one throttled progress publisher per
+            # LLM call. Mock/deterministic providers never call the sink, so
+            # evaluation determinism is unchanged.
+            publisher = StreamProgressPublisher(
+                session_factory=self._session_factory,
+                run_id=state["run_id"],
+                node_name="career_planning_agent",
+                turn=turn_index + 1,
+            )
+            with bind_stream_delta_sink(publisher.on_delta):
+                if available_tools:
+                    raw = await self._provider.generate_agent_turn(
+                        message=state["request"].message,
+                        context=context,
+                        replan_mode=mode,
+                        available_tools=available_tools,
+                        evidence_catalog=visible_catalog,
+                        force_final=force_final,
+                    )
+                else:
+                    raw = await self._provider.generate_plan(
+                        message=state["request"].message,
+                        context=context,
+                        replan_mode=mode,
+                        evidence_catalog=visible_catalog,
+                    )
+            stream_summaries.append(publisher.summary())
             usage = self._extract_usage(raw)
             self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
             total_usage = usage if total_usage is None else self._combine_usage(total_usage, usage)
@@ -717,7 +741,7 @@ class FixedPlanningGraph:
                             tool_round,
                             tool_call_count,
                         ),
-                        self._telemetry(total_usage, prompt_version, visibility),
+                        _step_telemetry(visibility),
                     )
                 turn = AgentTurnResponse.model_validate(raw)
             except ValidationError:
@@ -756,7 +780,7 @@ class FixedPlanningGraph:
                             tool_round,
                             tool_call_count,
                         ),
-                        self._telemetry(total_usage, prompt_version, repair_visibility),
+                        _step_telemetry(repair_visibility),
                     )
                 return NodeOutput(
                     (
@@ -766,7 +790,7 @@ class FixedPlanningGraph:
                         tool_round,
                         tool_call_count,
                     ),
-                    self._telemetry(total_usage, prompt_version, repair_visibility),
+                    _step_telemetry(repair_visibility),
                 )
             if turn.final is not None:
                 return NodeOutput(
@@ -777,7 +801,7 @@ class FixedPlanningGraph:
                         tool_round,
                         tool_call_count,
                     ),
-                    self._telemetry(total_usage, prompt_version, visibility),
+                    _step_telemetry(visibility),
                 )
             if force_final:
                 raise StructuredOutputError("Tool requested after Tool budget was exhausted")
@@ -826,7 +850,7 @@ class FixedPlanningGraph:
                 tool_round,
                 tool_call_count,
             ),
-            self._telemetry(total_usage, prompt_version, fallback_visibility),
+            _step_telemetry(fallback_visibility),
         )
 
     async def _revise_or_fallback(
