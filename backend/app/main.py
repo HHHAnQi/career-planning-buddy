@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.core.database import AsyncSessionFactory
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
+from app.core.rate_limit import RateLimitMiddleware
 from app.core.telemetry import RequestTelemetryMiddleware
 from app.harness.pairwise_sweep_executor import pairwise_sweep_executor
 from app.providers.embedding import LocalEmbeddingProvider
@@ -88,6 +89,12 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.state.runtime_providers = providers
+    # Added last so the guard wraps CORS and telemetry: metrics see every
+    # inbound request, and limits are enforced before any other processing.
+    application.add_middleware(
+        RateLimitMiddleware,
+        requests_per_minute=settings.rate_limit_per_minute,
+    )
     application.add_middleware(RequestTelemetryMiddleware)
     application.add_middleware(
         CORSMiddleware,

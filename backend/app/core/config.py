@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     agent_max_run_attempts: int = Field(default=3, ge=1, le=10)
     agent_worker_concurrency: int = Field(default=2, ge=1, le=16)
 
+    # HTTP boundary guard: 0 disables request-rate limiting entirely
+    # (test default); Compose deployments set a positive value via .env.
+    rate_limit_per_minute: int = Field(default=0, ge=0, le=100_000)
+
     # Pairwise Judge credentials are intentionally independent from the
     # agent-under-test. Live Judge mode fails closed when any field is absent.
     judge_llm_provider: Literal["mock", "fixture", "openai_compatible"] = "fixture"
