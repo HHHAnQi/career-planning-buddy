@@ -386,7 +386,6 @@ def _integer(value: object) -> int:
 
 def _persist_report(report: dict[str, object]) -> None:
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
-    BAD_CASE_ROOT.mkdir(parents=True, exist_ok=True)
     experiment_id = str(report["experiment_id"])
     (ARTIFACT_ROOT / f"{experiment_id}.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -397,10 +396,14 @@ def _persist_report(report: dict[str, object]) -> None:
         if isinstance(results, list)
         else []
     )
-    (BAD_CASE_ROOT / f"{experiment_id}.jsonl").write_text(
-        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in failed),
-        encoding="utf-8",
-    )
+    if failed:
+        # A bad-case file is written ONLY when the experiment has actual
+        # failures, so every file in bad_cases/ is meaningful.
+        BAD_CASE_ROOT.mkdir(parents=True, exist_ok=True)
+        (BAD_CASE_ROOT / f"{experiment_id}.jsonl").write_text(
+            "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in failed),
+            encoding="utf-8",
+        )
 
 
 def load_experiment(experiment_id: str) -> dict[str, object] | None:

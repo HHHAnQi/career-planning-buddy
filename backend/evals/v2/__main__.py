@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.config import Settings, get_settings
 from app.runtime.versioning import build_runtime_identity
 from app.services.evals import EvalService
+from evals.v2.bad_case_export import write_bad_cases
 from evals.v2.contracts import ExperimentCreate
 from evals.v2.dataset_loader import DatasetBundle, filter_cases, load_dataset
 from evals.v2.experiment_runner import ExperimentRunner
@@ -120,6 +121,7 @@ async def _run_experiment(args: argparse.Namespace, settings: Settings) -> dict[
         report = await runner.run_experiment_and_grade(
             experiment_id, dataset, grade=not args.no_grade
         )
+        write_bad_cases(report)
         return report.to_dict()
     finally:
         await engine.dispose()
