@@ -18,6 +18,7 @@ from app.providers.goal_understanding import (
 from app.providers.interview import InterviewProvider, build_interview_provider
 from app.providers.llm import PlanningProvider, build_planning_provider
 from app.providers.llm_client import LLMClient, build_llm_client
+from app.providers.rerank import build_rerank_provider
 from app.providers.resume_optimization import (
     ResumeOptimizationProvider,
     build_resume_optimization_provider,
@@ -60,6 +61,7 @@ def build_runtime_provider_registry(
     """Build each runtime Provider exactly once for one application instance."""
     embedding = build_embedding_provider(settings)
     search = build_search_provider(settings)
+    rerank = build_rerank_provider(settings)
     llm_client = build_llm_client(settings) if settings.llm_provider != "mock" else None
     return RuntimeProviderRegistry(
         planning=build_planning_provider(settings, client=llm_client),
@@ -76,6 +78,7 @@ def build_runtime_provider_registry(
             session_factory=session_factory,
             embedding_provider=embedding,
             search_provider=search,
+            rerank_provider=rerank,
         ),
         llm_client=llm_client,
     )

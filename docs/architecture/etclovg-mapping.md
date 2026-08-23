@@ -50,7 +50,10 @@ Agent 代码运行的位置与约束边界。
   - 会话级 = L2 个人记忆：0.8×相似度 + 0.2×新近性（14 天半衰期）打分选择，用户确认后才入上下文；
   - 持久 = L3 共享知识：搜索来源 → 候选原子 → 开发者审核 → pgvector 检索。
   - 证据可见性（`harness/evidence.py`）从权限角度控制"能看到什么"——模型不能引用看不见的证据。
-- 缺口：文档级 RAG（chunk 切分、混合检索、rerank）未实现（改进计划 P0-C，进行中）。
+- **已加固（2026-09）**：文档级 RAG 上线——`rag_document_chunks` 表（pgvector + pg_trgm 双索引）、
+  结构感知分块、RRF 混合检索、RerankProvider（Mock/TEI）、可答复性门控（拒答），
+  `document_search` 工具接入规划图；`evals/retrieval-v1` 冻结数据集 +
+  Recall@K/MRR/nDCG 三模式评测（`python -m scripts.run_retrieval_eval`）。
 
 ### L — 生命周期/编排
 

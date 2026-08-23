@@ -25,6 +25,7 @@ from app.models.provider_call import (
     EvalProviderFixtureItem,
     ProviderCall,
 )
+from app.models.rag_documents import RagDocumentChunk
 from app.models.resume import JobTarget, ResumeAssessment, ResumeRewriteDecision, ResumeVersion
 from app.models.review import Review
 from app.models.user import User
@@ -52,6 +53,7 @@ __all__ = [
     "JobTarget",
     "Plan",
     "ProviderCall",
+    "RagDocumentChunk",
     "Review",
     "ReplayComparison",
     "ResumeVersion",

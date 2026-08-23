@@ -16,9 +16,12 @@ from app.core.database import session_transaction
 from app.harness.events import EventRecorder
 from app.models.agent_run import ToolCall
 from app.providers.embedding import EmbeddingProvider
+from app.providers.rerank import MockRerankProvider, RerankProvider
 from app.providers.search import SearchProvider
 from app.schemas.enums import RunIntent
 from app.tools.contracts import (
+    DocumentSearchInput,
+    DocumentSearchOutput,
     EvidenceItem,
     InterviewEvidenceRetrieveInput,
     InterviewEvidenceRetrieveOutput,
@@ -37,6 +40,7 @@ from app.tools.contracts import (
     WebSearchOutput,
 )
 from app.tools.executors import (
+    DocumentSearchHandler,
     InterviewEvidenceRetrieveHandler,
     MemoryLookupHandler,
     RagRetrieveHandler,
@@ -510,8 +514,11 @@ def build_tool_registry(
     session_factory: async_sessionmaker[AsyncSession],
     embedding_provider: EmbeddingProvider,
     search_provider: SearchProvider,
+    rerank_provider: RerankProvider | None = None,
     available_tools_override: set[str] | None = None,
 ) -> ToolRegistry:
+    if rerank_provider is None:
+        rerank_provider = MockRerankProvider()
     registry = ToolRegistry(
         feature_stage=settings.agent_feature_stage,
         session_factory=session_factory,
@@ -548,6 +555,27 @@ def build_tool_registry(
             ),
             timeout_seconds=settings.tool_timeout_seconds,
             provider=embedding_provider.provider_name,
+        ),
+        RegisteredTool(
+            spec=ModelToolSpec(
+                name="document_search",
+                description=(
+                    "Hybrid search over the user's own resume and target-JD "
+                    "documents (semantic + lexical, reranked, gated)."
+                ),
+                input_json_schema=DocumentSearchInput.model_json_schema(),
+                contract_version="1.0",
+            ),
+            input_model=DocumentSearchInput,
+            output_model=DocumentSearchOutput,
+            handler=DocumentSearchHandler(
+                session_factory,
+                embedding_provider,
+                rerank_provider,
+                settings.rag_min_rerank_score,
+            ),
+            timeout_seconds=settings.tool_timeout_seconds,
+            provider=rerank_provider.provider_name,
         ),
         RegisteredTool(
             spec=ModelToolSpec(

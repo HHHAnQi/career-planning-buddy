@@ -1,0 +1,167 @@
+"""Document RAG use cases: ingest, hybrid retrieval, rerank, gating.
+
+Pipeline: chunk (deterministic) → embed (provider, failure-tolerant) →
+persist → hybrid RRF recall → rerank → answerability gate.
+
+The gate is the anti-hallucination commitment: when no chunk clears
+``rag_min_rerank_score`` the search returns ``sufficient=False`` and the
+caller must not fabricate an answer — the same philosophy as the
+evidence-visibility validator on the planning graph.
+"""
+
+from __future__ import annotations
+
+import logging
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agent.errors import AgentError
+from app.core.database import session_transaction
+from app.models.rag_documents import RagDocumentChunk
+from app.providers.embedding import EmbeddingProvider
+from app.providers.rerank import RerankProvider
+from app.rag.chunking import chunk_document, chunk_hash
+from app.repositories.rag_documents import RagDocumentRepository
+from app.tools.sanitization import sanitize_untrusted_text
+
+logger = logging.getLogger(__name__)
+
+MAX_CHUNKS_PER_DOCUMENT = 60
+RECALL_CANDIDATES = 20
+
+
+class DocumentSearchResult:
+    """One gated retrieval hit."""
+
+    def __init__(
+        self,
+        *,
+        chunk: RagDocumentChunk,
+        rerank_score: float,
+        vector_rank: int | None,
+        lexical_rank: int | None,
+    ) -> None:
+        self.chunk = chunk
+        self.rerank_score = rerank_score
+        self.vector_rank = vector_rank
+        self.lexical_rank = lexical_rank
+
+
+class DocumentSearchOutcome:
+    """Search result set with the answerability verdict."""
+
+    def __init__(self, *, sufficient: bool, results: list[DocumentSearchResult]):
+        self.sufficient = sufficient
+        self.results = results
+
+
+class RagDocumentService:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        embedding_provider: EmbeddingProvider,
+        rerank_provider: RerankProvider,
+        min_rerank_score: float,
+    ) -> None:
+        self._session = session
+        self._embeddings = embedding_provider
+        self._rerank = rerank_provider
+        self._min_rerank_score = min_rerank_score
+        self._repo = RagDocumentRepository(session)
+
+    async def ingest_document(
+        self,
+        *,
+        user_id: UUID,
+        doc_kind: str,
+        source_id: UUID,
+        title: str,
+        text: str,
+    ) -> int:
+        """(Re)chunk, embed, and persist one document; returns chunk count."""
+
+        chunks = chunk_document(text)[:MAX_CHUNKS_PER_DOCUMENT]
+        if not chunks:
+            return 0
+        embeddings: list[list[float] | None] = [None] * len(chunks)
+        embedding_failed = False
+        try:
+            vectors = await self._embeddings.embed(chunks)
+            if len(vectors) == len(chunks):
+                embeddings = [vector for vector in vectors]
+        except AgentError as error:
+            embedding_failed = True
+            logger.warning(
+                "rag chunk embedding failed (%s); lexical-only retrieval",
+                type(error).__name__,
+            )
+        payload = [
+            (content, chunk_hash(content), embedding)
+            for content, embedding in zip(chunks, embeddings, strict=True)
+        ]
+        async with session_transaction(self._session):
+            count = await self._repo.replace_chunks(
+                user_id=user_id,
+                doc_kind=doc_kind,
+                source_id=source_id,
+                title=title,
+                chunks=payload,
+                embedding_failed=embedding_failed,
+            )
+        return count
+
+    async def search(
+        self,
+        *,
+        user_id: UUID,
+        query: str,
+        limit: int = 5,
+    ) -> DocumentSearchOutcome:
+        """Hybrid recall → rerank → gate. Never raises on empty corpora."""
+
+        query_vector: list[float] | None = None
+        try:
+            vectors = await self._embeddings.embed([query])
+            query_vector = vectors[0] if vectors else None
+        except AgentError:
+            query_vector = None
+
+        async with session_transaction(self._session):
+            recalled = await self._repo.hybrid_search(
+                user_id=user_id,
+                query_text=query,
+                query_vector=query_vector,
+                limit=RECALL_CANDIDATES,
+            )
+        if not recalled:
+            return DocumentSearchOutcome(sufficient=False, results=[])
+
+        scores = await self._rerank.rerank(
+            query, [row.chunk.content for row in recalled]
+        )
+        ranked = sorted(
+            (
+                DocumentSearchResult(
+                    chunk=row.chunk,
+                    rerank_score=float(score) if index < len(scores) else 0.0,
+                    vector_rank=row.vector_rank,
+                    lexical_rank=row.lexical_rank,
+                )
+                for index, (row, score) in enumerate(
+                    zip(recalled, scores, strict=False)
+                )
+                if float(score) >= self._min_rerank_score
+            ),
+            key=lambda item: (-item.rerank_score, item.chunk.chunk_index),
+        )
+        return DocumentSearchOutcome(
+            sufficient=bool(ranked), results=ranked[:limit]
+        )
+
+
+def sanitized_snippet(content: str, limit: int = 1200) -> str:
+    """Untrusted document content is sanitized before entering evidence."""
+
+    return sanitize_untrusted_text(content, limit)

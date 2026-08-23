@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     baidu_search_max_results: int = Field(default=5, ge=1, le=10)
     baidu_search_timeout_seconds: float = Field(default=8, gt=0, le=30)
     rag_min_similarity: float = Field(default=0.35, ge=0, le=1)
+    # Second-stage reranker for document retrieval. "mock" is a deterministic
+    # lexical reranker (CI/Mock mode never touches the network); "tei" targets
+    # a HuggingFace text-embeddings-inference /rerank endpoint (bge-reranker).
+    rerank_provider: Literal["mock", "tei"] = "mock"
+    rerank_base_url: AnyHttpUrl | None = None
+    rerank_timeout_seconds: float = Field(default=8, gt=0, le=30)
+    # Answerability gate: chunks scoring below this rerank score are
+    # dropped; the search returns "insufficient evidence" instead of
+    # forcing a weak match.
+    rag_min_rerank_score: float = Field(default=0.05, ge=0, le=1)
     embedding_provider: Literal["mock", "local"] = "mock"
     embedding_model_path: Path | None = None
 

@@ -44,6 +44,12 @@ Frozen datasets, deterministic graders, CI hard gates. Current numbers on the de
 | Stage 5 planning/repair/replan/safety | `stage5-v1` (30 cases, 11 graders) | 30/30 = 100% |
 | Stage 5 via Eval V2 hard gates | `stage5-v1`, 1 trial/case | hard-gate pass fraction 1.0, first-attempt success 1.0 |
 | Stage 6 memory/context selection | `stage6-memory-context-v1` (12 cases) | 12/12 = 100% |
+| Document retrieval (lexical, Mock embeddings) | `retrieval-v1` (10 cases, corpus-level) | Recall@5 0.85 / MRR 0.85 / nDCG@5 0.82 |
+
+Retrieval metrics run with `python -m scripts.run_retrieval_eval` across
+vector / lexical / hybrid / hybrid+rerank modes; with the deterministic
+Mock embedding the vector channel is noise (honest caveat recorded in the
+report) — rerun with `EMBEDDING_PROVIDER=local` for semantic numbers.
 | Regression suite | backend tests | 730+ passing (schema/service/repository/API/runtime/eval) |
 
 Failed cases are exported automatically to `backend/evals/bad_cases/` as structured JSONL (runtime failures and hard-gate misses; user-cancelled trials are excluded) for reproduction and root-causing.

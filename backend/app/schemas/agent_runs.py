@@ -240,7 +240,7 @@ class MemoryContext(StrictModel):
 
 
 class EvidenceCatalogItem(StrictModel):
-    kind: Literal["memory", "experience_atom", "search_source"]
+    kind: Literal["memory", "experience_atom", "search_source", "rag_document_chunk"]
     id: UUID
     title: str = Field(min_length=1, max_length=300)
     content: str = Field(min_length=1, max_length=2000)
@@ -323,7 +323,7 @@ class WeeklyFocusCandidate(StrictModel):
 
 
 class EvidenceRef(StrictModel):
-    kind: Literal["memory", "experience_atom", "search_source"]
+    kind: Literal["memory", "experience_atom", "search_source", "rag_document_chunk"]
     id: UUID
 
 

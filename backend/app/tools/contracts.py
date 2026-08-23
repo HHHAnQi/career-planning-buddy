@@ -49,6 +49,7 @@ class EvidenceItem(StrictModel):
         "interview_turn",
         "resume_claim",
         "job_requirement",
+        "rag_document_chunk",
     ]
     id: UUID
     title: str = Field(min_length=1, max_length=300)
@@ -91,6 +92,30 @@ class RagEvidenceItem(StrictModel):
 
 class RagRetrieveOutput(StrictModel):
     items: list[RagEvidenceItem]
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+
+
+class DocumentSearchInput(StrictModel):
+    query: str = Field(min_length=1, max_length=300)
+    limit: int = Field(default=5, ge=1, le=5)
+
+
+class DocumentSearchItem(StrictModel):
+    chunk_id: UUID
+    doc_kind: Literal["resume", "job_target"]
+    source_id: UUID
+    title: str
+    content: str
+    rerank_score: float = Field(ge=0, le=1)
+    vector_rank: int | None = None
+    lexical_rank: int | None = None
+
+
+class DocumentSearchOutput(StrictModel):
+    items: list[DocumentSearchItem]
+    # False means no chunk cleared the answerability gate: the caller must
+    # not answer from these results.
+    sufficient: bool = True
     evidence: list[EvidenceItem] = Field(default_factory=list)
 
 

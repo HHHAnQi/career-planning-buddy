@@ -330,10 +330,12 @@ async def test_tool_argument_timeout_and_availability_guards(
     assert [item.name for item in registry.available_specs()] == [
         "memory_lookup",
         "rag_retrieve",
+        "document_search",
     ]
     assert [item.name for item in registry.available_specs(requires_fresh_information=True)] == [
         "memory_lookup",
         "rag_retrieve",
+        "document_search",
         "web_search",
     ]
     context = ToolContext(

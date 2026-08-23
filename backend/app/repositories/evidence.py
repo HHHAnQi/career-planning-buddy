@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.evidence import ExperienceAtom, ExperienceAtomCandidate, Memory, SearchSource
+from app.models.rag_documents import RagDocumentChunk
 
 
 class EvidenceRepository:
@@ -225,6 +226,10 @@ class EvidenceRepository:
             select(ExperienceAtom.id).where(ExperienceAtom.is_active.is_(True))
         )
         catalog.update(("experience_atom", atom_id) for atom_id in tool_rows.scalars())
+        chunk_ids = await self._session.scalars(
+            select(RagDocumentChunk.id).where(RagDocumentChunk.user_id == user_id)
+        )
+        catalog.update(("rag_document_chunk", chunk_id) for chunk_id in chunk_ids)
         return catalog
 
     async def resolve_memories(self, user_id: UUID, ids: Iterable[UUID]) -> list[Memory]:

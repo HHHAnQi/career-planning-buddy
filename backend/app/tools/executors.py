@@ -11,13 +11,18 @@ from app.agent.errors import AgentError, ProviderUnavailableError
 from app.agent.resume_context_selection import lexical_similarity, requirement_matches
 from app.core.database import session_transaction
 from app.providers.embedding import EmbeddingProvider
+from app.providers.rerank import RerankProvider
 from app.providers.search import SearchProvider
 from app.repositories.evidence import EvidenceRepository
 from app.repositories.interviews import InterviewRepository
 from app.repositories.resumes import ResumeRepository
 from app.schemas.resumes import JobRequirement, ResumeClaim
+from app.services.rag_documents import RagDocumentService
 from app.services.resumes import stable_text_items
 from app.tools.contracts import (
+    DocumentSearchInput,
+    DocumentSearchItem,
+    DocumentSearchOutput,
     EvidenceItem,
     InterviewEvidenceRetrieveInput,
     InterviewEvidenceRetrieveItem,
@@ -347,6 +352,67 @@ class ResumeGapAnalyzeHandler:
                 )
             )
         return ResumeGapAnalyzeOutput(items=items)
+
+
+class DocumentSearchHandler:
+    """Hybrid document retrieval over the current user's resume/JD chunks."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        embedding_provider: EmbeddingProvider,
+        rerank_provider: RerankProvider,
+        min_rerank_score: float,
+    ) -> None:
+        self._sessions = session_factory
+        self._embedding = embedding_provider
+        self._rerank = rerank_provider
+        self._min_rerank_score = min_rerank_score
+
+    async def __call__(self, payload: BaseModel, context: ToolContext) -> BaseModel:
+        request = DocumentSearchInput.model_validate(payload)
+        async with self._sessions() as session:
+            service = RagDocumentService(
+                session,
+                embedding_provider=self._embedding,
+                rerank_provider=self._rerank,
+                min_rerank_score=self._min_rerank_score,
+            )
+            outcome = await service.search(
+                user_id=context.user_id,
+                query=request.query,
+                limit=request.limit,
+            )
+        items: list[DocumentSearchItem] = []
+        evidence: list[EvidenceItem] = []
+        for result in outcome.results:
+            content = _clean(result.chunk.content, 1200)
+            items.append(
+                DocumentSearchItem(
+                    chunk_id=result.chunk.id,
+                    doc_kind=result.chunk.doc_kind,
+                    source_id=result.chunk.source_id,
+                    title=_clean(result.chunk.title, 300),
+                    content=content,
+                    rerank_score=max(0.0, min(1.0, result.rerank_score)),
+                    vector_rank=result.vector_rank,
+                    lexical_rank=result.lexical_rank,
+                )
+            )
+            evidence.append(
+                EvidenceItem(
+                    kind="rag_document_chunk",
+                    id=result.chunk.id,
+                    title=result.chunk.title,
+                    content=content,
+                    reliability=0.85,
+                )
+            )
+        return DocumentSearchOutput(
+            items=items,
+            sufficient=outcome.sufficient,
+            evidence=evidence,
+        )
 
 
 def _clean(value: str, limit: int) -> str:
