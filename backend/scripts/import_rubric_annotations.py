@@ -92,7 +92,7 @@ def main() -> int:
                 )
                 continue
             by_case[case_id]["annotations"] = {
-                **scores,  # type: ignore[arg-type]
+                **scores,
                 "rationale": rationale,
                 "annotator": annotator or "unknown",
                 "annotated_at": annotated_at,

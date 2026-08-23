@@ -8,7 +8,7 @@ fill the six annotation columns, then merge back with
 
 Usage::
 
-    python -m scripts.export_rubric_worksheet            # → evals/annotations/rubric-v1-worksheet.csv
+    python -m scripts.export_rubric_worksheet   # → evals/annotations/…-worksheet.csv
     python -m scripts.export_rubric_worksheet --out my.csv
 """
 
@@ -42,14 +42,21 @@ COLUMNS = [
 
 
 def _digest(candidate: dict[str, object]) -> str:
+    raw_tasks = candidate.get("tasks", [])
+    raw_focus = candidate.get("weekly_focus", [])
+    tasks_list: list[dict[str, object]] = (
+        raw_tasks if isinstance(raw_tasks, list) else []
+    )
+    focus_list: list[dict[str, object]] = (
+        raw_focus if isinstance(raw_focus, list) else []
+    )
     tasks = "\n".join(
         f"{task['scheduled_date']} | {task['title']} | {task['starter_action']}"
         f" | 交付:{task['deliverable']} | {task['estimated_minutes']}min"
-        for task in candidate.get("tasks", [])  # type: ignore[union-attr]
+        for task in tasks_list
     )
     focus = "\n".join(
-        f"第{item.get('week_index')}周焦点: {item.get('focus')}"
-        for item in candidate.get("weekly_focus", [])  # type: ignore[union-attr]
+        f"第{item.get('week_index')}周焦点: {item.get('focus')}" for item in focus_list
     )
     return f"【周焦点】\n{focus}\n【任务】\n{tasks}"
 
