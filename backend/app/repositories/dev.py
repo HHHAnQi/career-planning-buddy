@@ -94,3 +94,38 @@ class DevTraceRepository:
             (kind, status, int(count), int(avg_latency or 0))
             for kind, status, count, avg_latency in rows
         ]
+
+    async def repair_prompt_version_counts(self, *, since: datetime) -> list[tuple[str, int]]:
+        """(prompt_version, step_count) groups for repair-attempted steps."""
+
+        rows = await self._session.execute(
+            select(AgentStep.prompt_version, func.count().label("step_count"))
+            .where(
+                AgentStep.created_at >= since,
+                AgentStep.prompt_version.is_not(None),
+            )
+            .group_by(AgentStep.prompt_version)
+        )
+        return [
+            (version, int(count))
+            for version, count in rows
+            if version is not None
+        ]
+
+    async def fallback_reason_counts(self, *, since: datetime) -> list[tuple[str, int]]:
+        """(fallback_reason, run_count) groups over the window."""
+
+        rows = await self._session.execute(
+            select(AgentRun.fallback_reason, func.count().label("run_count"))
+            .where(
+                AgentRun.created_at >= since,
+                AgentRun.fallback_reason.is_not(None),
+            )
+            .group_by(AgentRun.fallback_reason)
+            .order_by(AgentRun.fallback_reason)
+        )
+        return [
+            (reason, int(count))
+            for reason, count in rows
+            if reason is not None
+        ]

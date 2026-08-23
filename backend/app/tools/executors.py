@@ -1,6 +1,5 @@
 """Read-only Stage 4 Tool handlers backed by repositories and Provider protocols."""
 
-import re
 from decimal import Decimal
 from hashlib import sha256
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -37,9 +36,7 @@ from app.tools.contracts import (
     WebSearchItem,
     WebSearchOutput,
 )
-
-CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-SCRIPT_BLOCK = re.compile(r"(?is)<script\b[^>]*>.*?</script>")
+from app.tools.sanitization import sanitize_untrusted_text
 
 
 class MemoryLookupHandler:
@@ -353,10 +350,9 @@ class ResumeGapAnalyzeHandler:
 
 
 def _clean(value: str, limit: int) -> str:
-    without_scripts = SCRIPT_BLOCK.sub("", value)
-    cleaned = CONTROL_CHARACTERS.sub("", without_scripts)
-    cleaned = " ".join(cleaned.split())
-    return cleaned[:limit]
+    """Sanitize untrusted tool content before it enters the evidence catalog."""
+
+    return sanitize_untrusted_text(value, limit)
 
 
 def _normalize_url(value: str) -> str:

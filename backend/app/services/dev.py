@@ -38,6 +38,9 @@ from app.schemas.dev import (
     DevSnapshot,
     DevStepTrace,
     DevToolTrace,
+    FallbackReasonCount,
+    RepairReportResponse,
+    RepairStat,
     ReplayDiff,
     ReplayResponse,
     TerminalInvariant,
@@ -179,6 +182,76 @@ class DevTraceService:
                     ),
                 )
                 for kind, bucket in sorted(provider_kinds.items())
+            ],
+        )
+
+    async def repair_report(self, *, days: int) -> RepairReportResponse:
+        """Repair-mechanism outcomes: trigger, success, and fallback reasons.
+
+        Repairs are identified by their persisted step prompt_version
+        (``format_repair`` / ``business_repair`` substrings cover both the
+        real and mock version strings), and failures by the run's terminal
+        fallback_reason.
+        """
+
+        since = datetime.now(UTC) - timedelta(days=days)
+        async with session_transaction(self._session):
+            version_counts = await self._repo.repair_prompt_version_counts(since=since)
+            reason_counts = await self._repo.fallback_reason_counts(since=since)
+
+        reasons = {reason: count for reason, count in reason_counts}
+
+        def _stat(
+            *,
+            kind: str,
+            version_substring: str,
+            failed_reasons: set[str],
+            declined_reasons: set[str],
+        ) -> RepairStat:
+            triggered = sum(
+                count
+                for version, count in version_counts
+                if version_substring in version
+            )
+            failed_after_attempt = sum(
+                count for reason, count in reason_counts if reason in failed_reasons
+            )
+            declined = sum(
+                count for reason, count in reason_counts if reason in declined_reasons
+            )
+            succeeded = max(triggered - failed_after_attempt, 0)
+            return RepairStat(
+                kind=kind,
+                triggered=triggered,
+                succeeded=succeeded,
+                failed_after_attempt=failed_after_attempt,
+                declined_by_budget=declined,
+                success_rate=succeeded / triggered if triggered else 0.0,
+            )
+
+        return RepairReportResponse(
+            window_days=days,
+            generated_at=datetime.now(UTC),
+            repairs=[
+                _stat(
+                    kind="format_repair",
+                    version_substring="format_repair",
+                    failed_reasons={"format_repair_failed"},
+                    declined_reasons=set(),
+                ),
+                _stat(
+                    kind="business_repair",
+                    version_substring="business_repair",
+                    failed_reasons={"business_repair_invalid"},
+                    declined_reasons={
+                        "business_repair_budget_insufficient",
+                        "business_repair_exhausted",
+                    },
+                ),
+            ],
+            fallback_reasons=[
+                FallbackReasonCount(reason=reason, count=count)
+                for reason, count in sorted(reasons.items())
             ],
         )
 

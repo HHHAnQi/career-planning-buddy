@@ -2305,6 +2305,25 @@
         "title": "FactualFinding",
         "type": "object"
       },
+      "FallbackReasonCount": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "count"
+        ],
+        "title": "FallbackReasonCount",
+        "type": "object"
+      },
       "GoalBriefConfirmResponse": {
         "additionalProperties": false,
         "properties": {
@@ -5350,6 +5369,90 @@
           "checks"
         ],
         "title": "ReadinessResponse",
+        "type": "object"
+      },
+      "RepairReportResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "fallback_reasons": {
+            "items": {
+              "$ref": "#/components/schemas/FallbackReasonCount"
+            },
+            "title": "Fallback Reasons",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "repairs": {
+            "items": {
+              "$ref": "#/components/schemas/RepairStat"
+            },
+            "title": "Repairs",
+            "type": "array"
+          },
+          "window_days": {
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_days",
+          "generated_at",
+          "repairs",
+          "fallback_reasons"
+        ],
+        "title": "RepairReportResponse",
+        "type": "object"
+      },
+      "RepairStat": {
+        "additionalProperties": false,
+        "description": "One repair mechanism's outcome over the reporting window.",
+        "properties": {
+          "declined_by_budget": {
+            "title": "Declined By Budget",
+            "type": "integer"
+          },
+          "failed_after_attempt": {
+            "title": "Failed After Attempt",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "format_repair",
+              "business_repair"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "succeeded": {
+            "title": "Succeeded",
+            "type": "integer"
+          },
+          "success_rate": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Success Rate",
+            "type": "number"
+          },
+          "triggered": {
+            "title": "Triggered",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "triggered",
+          "succeeded",
+          "failed_after_attempt",
+          "declined_by_budget",
+          "success_rate"
+        ],
+        "title": "RepairStat",
         "type": "object"
       },
       "ReplanMode": {
@@ -8951,6 +9054,57 @@
           }
         ],
         "summary": "Get Eval",
+        "tags": [
+          "developer"
+        ]
+      }
+    },
+    "/api/v1/dev/repair-report": {
+      "get": {
+        "description": "Repair-mechanism outcomes and fallback-reason distribution.",
+        "operationId": "get_repair_report_api_v1_dev_repair_report_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 365,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepairReportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Repair Report",
         "tags": [
           "developer"
         ]

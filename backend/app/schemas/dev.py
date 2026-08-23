@@ -209,3 +209,31 @@ class UsageReportResponse(StrictModel):
     graphs: list[UsageGraphBreakdown]
     daily: list[UsageDailyPoint]
     provider_kinds: list[UsageProviderKind]
+
+
+class RepairStat(StrictModel):
+    """One repair mechanism's outcome over the reporting window."""
+
+    kind: Literal["format_repair", "business_repair"]
+    # Repair LLM attempts actually made (persisted steps with the repair
+    # prompt version).
+    triggered: int
+    succeeded: int
+    # Runs that still fell back after a repair attempt.
+    failed_after_attempt: int
+    # Runs where repair was requested but declined by the budget guard
+    # (no LLM attempt was made).
+    declined_by_budget: int
+    success_rate: float = Field(ge=0.0, le=1.0)
+
+
+class FallbackReasonCount(StrictModel):
+    reason: str
+    count: int
+
+
+class RepairReportResponse(StrictModel):
+    window_days: int = Field(ge=1, le=365)
+    generated_at: datetime
+    repairs: list[RepairStat]
+    fallback_reasons: list[FallbackReasonCount]
