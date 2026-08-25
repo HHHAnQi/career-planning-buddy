@@ -15,8 +15,8 @@ def test_stage5_adapter_loads_thirty_hash_verified_v2_cases() -> None:
     bundle = load_dataset()
 
     assert bundle.manifest.dataset_id == "stage5"
-    assert len(bundle.cases) == 30
-    assert len({case.case_id for case in bundle.cases}) == 30
+    assert len(bundle.cases) == 33  # 30 mock + 3 live-only
+    assert len({case.case_id for case in bundle.cases}) == 33
     assert all(case.schema_version == "2" for case in bundle.cases)
     assert all(len(case.fixture_hash) == 64 for case in bundle.cases)
 

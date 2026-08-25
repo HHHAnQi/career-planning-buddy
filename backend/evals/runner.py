@@ -72,13 +72,24 @@ class EvalCase(StrictModel):
     expected_tools: list[Literal["memory_lookup", "rag_retrieve", "web_search"]] = Field(
         default_factory=list, max_length=2
     )
+    # Live-only cases carry natural memory references and seeded Memories;
+    # the deterministic mock runner cannot execute them (no [mock:] script)
+    # and skips them — the mock dataset stays at its frozen 30 cases.
+    live_only: bool = False
+    confirmed_memories: list[dict[str, object]] = Field(default_factory=list)
 
 
 def load_cases(limit: int | None = None) -> list[EvalCase]:
     lines = DATASET_PATH.read_text(encoding="utf-8").splitlines()
-    cases = [EvalCase.model_validate_json(line) for line in lines if line.strip()]
+    cases = [
+        case
+        for line in lines
+        if line.strip()
+        for case in [EvalCase.model_validate_json(line)]
+        if not case.live_only
+    ]
     if len(cases) != 30:
-        raise RuntimeError(f"stage5-v1 must contain exactly 30 cases, found {len(cases)}")
+        raise RuntimeError(f"stage5-v1 must contain exactly 30 mock cases, found {len(cases)}")
     return cases[:limit] if limit is not None else cases
 
 

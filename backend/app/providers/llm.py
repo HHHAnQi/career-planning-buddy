@@ -25,6 +25,7 @@ from app.providers.llm_contracts import (
     LLMToolDefinition,
 )
 from app.providers.llm_profiles import model_for_operation, resolve_provider_profile
+from app.providers.pricing import estimate_cost_cny
 from app.providers.streaming import current_stream_delta_sink
 from app.schemas.agent_runs import (
     AgentTurnResponse,
@@ -343,6 +344,12 @@ class OpenAICompatiblePlanningProvider:
             tokens_in=response.usage.input_tokens,
             tokens_out=response.usage.output_tokens,
             latency_ms=response.latency_ms,
+            # Estimated list-price cost; unknown models stay at 0.
+            cost_cny=estimate_cost_cny(
+                response.model_id,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            ),
         )
 
 

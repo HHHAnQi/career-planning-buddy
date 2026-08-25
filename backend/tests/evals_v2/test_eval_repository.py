@@ -42,7 +42,7 @@ async def test_stage5_dataset_creates_experiment_and_empty_trials_without_scores
     )
 
     assert experiment.status == "draft"
-    assert len(trials) == 30
+    assert len(trials) == 33  # 30 mock + 3 live-only memory cases
     assert all(trial.status == "pending" and trial.run_id is None for trial in trials)
     async with session_transaction(db_session):
         scores = await EvalRepository(db_session).list_scores(trials[0].id)

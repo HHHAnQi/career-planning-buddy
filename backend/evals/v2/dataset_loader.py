@@ -34,6 +34,8 @@ class LegacyStage5Case(StrictModel):
     expected_tools: list[Literal["memory_lookup", "rag_retrieve", "web_search"]] = Field(
         default_factory=list
     )
+    live_only: bool = False
+    confirmed_memories: list[dict[str, object]] = Field(default_factory=list)
 
 
 def load_dataset(manifest_path: Path = DEFAULT_MANIFEST_PATH) -> DatasetBundle:
@@ -118,7 +120,7 @@ def _adapt_stage5(case: LegacyStage5Case, manifest: DatasetManifest) -> EvalCase
             "initial_plan": None,
             "initial_tasks": [],
             "initial_reviews": [],
-            "confirmed_memories": [],
+            "confirmed_memories": case.confirmed_memories,
             "unconfirmed_memory_candidates": [],
             "search_fixtures": {},
             "provider_fixtures": {},

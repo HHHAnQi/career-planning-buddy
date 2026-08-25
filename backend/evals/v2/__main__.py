@@ -47,6 +47,27 @@ def _build_dataset(args: argparse.Namespace) -> DatasetBundle:
         bundle = load_dataset()
     else:
         bundle = load_runtime_smoke_dataset()
+    mode = args.provider_mode
+    if mode is None:
+        from app.core.config import get_settings
+
+        mode = get_settings().eval_provider_mode
+    # Mode-scoped validity: [mock:tool-...] cases script TOOL CALLS for the
+    # deterministic mock — a real model gets no callable signal from them.
+    # (Other [mock:...] markers, e.g. malformed-output scripts for repair
+    # cases, are live-tolerable: the case passes whenever the model simply
+    # does not err.) live_only cases (seeded memories + natural references)
+    # only make sense against a real model.
+    if mode == "live":
+        bundle.cases = [
+            case
+            for case in bundle.cases
+            if "[mock:tool-" not in case.scenario.user_request
+        ]
+    else:
+        bundle.cases = [
+            case for case in bundle.cases if not case.scenario.confirmed_memories
+        ]
     if args.cases:
         bundle = filter_cases(bundle, list(args.cases))
     return bundle

@@ -41,7 +41,7 @@ def test_unmapped_goal_type_raises_rather_than_guessing() -> None:
 
 def test_every_stage5_case_profile_resolves_to_runtime_payload() -> None:
     bundle = load_dataset()
-    assert len(bundle.cases) == 30
+    assert len(bundle.cases) == 33  # 30 mock + 3 live-only
     for case in bundle.cases:
         profile = case.scenario.profile
         if profile is None:  # clarify-* cases intentionally omit the profile
