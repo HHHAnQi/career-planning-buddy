@@ -45,6 +45,7 @@ Frozen datasets, deterministic graders, CI hard gates. Current numbers on the de
 | Stage 5 via Eval V2 hard gates | `stage5-v1`, 1 trial/case | hard-gate pass fraction 1.0, first-attempt success 1.0 |
 | Stage 6 memory/context selection | `stage6-memory-context-v1` (12 cases) | 12/12 = 100% |
 | Document retrieval (bge-m3 embeddings) | `retrieval-v1` (10 cases, corpus-level) | vector Recall@5 1.0 / MRR 1.0; hybrid 0.85/0.90; lexical 0.85 |
+| Live operations (real GLM-4.7, dev deployment) | 58 persisted Runs | 89.7% completed / 10.3% degraded (business-repair fallbacks); latency P50 25.4s / P95 72.2s; tokens 135K in / 76K out |
 
 Retrieval evaluation (`python -m scripts.run_retrieval_eval`) compares
 vector / lexical / hybrid / hybrid+rerank modes on the frozen golden set.
