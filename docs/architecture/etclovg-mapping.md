@@ -63,7 +63,10 @@ Agent 代码运行的位置与约束边界。
   validate → 最多一次修复 → fallback → companion → persist）；"唯一终态"由部分唯一索引
   强制；崩溃恢复 `recover_interrupted` + 租约接管 + attempt fencing 防旧写；
   幂等取消（Idempotency-Key）；版本化重规划；`checkpoints.py` 服务于回放路径。
-- 缺口：节点级断点续跑——Run 重试从图起点重跑（改进计划 P1：最贵节点先做检查点持久化）。
+- **已加固（2026-09）**：career_planning_agent 节点级 checkpoint 上线——复用
+  resume 图的 CheckpointStore 模式：输入指纹（消息+上下文+模式）匹配才复用、
+  恢复完全跳过 LLM 调用、损坏/漂移的检查点静默降级为重新生成、复用步骤的
+  trace 携带 checkpoint_reused 标记。同轮多工具调用改为并行执行（gather 保序）。
 
 ### O — 可观测性
 

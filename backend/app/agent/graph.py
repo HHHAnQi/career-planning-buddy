@@ -1,6 +1,10 @@
 """Fixed Stage 4 planning/replanning graph topology and node orchestration."""
 
+import asyncio
+import json
+import logging
 from datetime import timedelta
+from hashlib import sha256
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
@@ -29,6 +33,7 @@ from app.agent.ports import PlanningResultPort
 from app.core.database import session_transaction
 from app.core.time import product_today
 from app.harness.budget import BudgetGuard
+from app.harness.checkpoints import CheckpointStore
 from app.harness.evidence import build_evidence_visibility
 from app.harness.snapshots import SnapshotService
 from app.harness.stream_progress import StreamProgressPublisher
@@ -68,6 +73,66 @@ from app.schemas.enums import GoalType, PlanStatus, ReplanMode, RunIntent, TaskS
 from app.tools.contracts import ToolContext
 from app.tools.registry import ToolRegistry
 
+logger = logging.getLogger(__name__)
+
+
+def _planning_input_fingerprint(
+    message: str,
+    context: PlanningContext,
+    replan_mode: ReplanMode | str,
+) -> str:
+    """Stable hash of every prompt determinant for the planning node.
+
+    The planning context (profile, window, source plan/review, summaries)
+    plus the request message and replan mode fully determine the LLM
+    input; these are immutable per Run, so a checkpoint from an earlier
+    attempt with a matching fingerprint is safe to reuse.
+    """
+
+    mode = replan_mode.value if isinstance(replan_mode, ReplanMode) else replan_mode
+    encoded = json.dumps(
+        {
+            "message": message,
+            "context": context.model_dump(mode="json"),
+            "replan_mode": mode,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return sha256(encoded).hexdigest()
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    return value if isinstance(value, int) else default
+
+
+def _candidate_checkpoint_payload(
+    output: NodeOutput[
+        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
+    ],
+    state: PlanningState,
+) -> dict[str, object]:
+    candidate, catalog, visibility, tool_round, tool_call_count = output.value
+    telemetry = output.telemetry
+    return {
+        "attempt": _as_int(state.get("attempt_count"), 1),
+        "candidate": candidate.model_dump(mode="json"),
+        "evidence_catalog": [item.model_dump(mode="json") for item in catalog],
+        "visibility": visibility.model_dump(mode="json"),
+        "tool_round": tool_round,
+        "tool_call_count": tool_call_count,
+        "fallback_reason": state.get("fallback_reason"),
+        "usage": {
+            "tokens_in": telemetry.tokens_in,
+            "tokens_out": telemetry.tokens_out,
+            "cost_cny": str(telemetry.cost_cny),
+            "model_id": telemetry.model_id,
+            # Restored telemetry describes no new physical call.
+            "latency_ms": 0,
+        },
+    }
+
 
 class FixedPlanningGraph:
     """Explicit, bounded topology matching the Stage 2 runtime specification."""
@@ -84,6 +149,7 @@ class FixedPlanningGraph:
         embedding_provider: EmbeddingProvider,
     ) -> None:
         self._session_factory = session_factory
+        self._checkpoints = CheckpointStore(session_factory)
         self._provider = provider
         self._nodes = node_runner
         self._finalizer = finalizer
@@ -663,6 +729,105 @@ class FixedPlanningGraph:
     ) -> NodeOutput[
         tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
     ]:
+        """Checkpointed wrapper around the expensive planning generation.
+
+        Recovery semantics (mirrors the resume optimization graph): a
+        checkpoint saved by an earlier attempt of this Run is reused iff
+        the planning input fingerprint matches — the prompt inputs are
+        immutable per Run, so a fingerprint mismatch means tampering or
+        schema drift and the checkpoint is ignored. Restoring skips the
+        provider calls entirely (the expensive part); validation and the
+        deterministic downstream nodes re-run normally.
+        """
+
+        fingerprint = _planning_input_fingerprint(
+            state["request"].message,
+            state["planning_context"],
+            state["intent"].replan_mode,
+        )
+        frozen = await self._checkpoints.load(
+            state["run_id"], "career_planning_agent"
+        )
+        if frozen is not None and frozen.get("input_hash") == fingerprint:
+            restored = self._restore_candidate_checkpoint(frozen, state)
+            if restored is not None:
+                return restored
+
+        output = await self._generate_candidate_uncached(state, step_id)
+        try:
+            payload = {
+                **_candidate_checkpoint_payload(output, state),
+                "input_hash": fingerprint,
+            }
+            await self._checkpoints.save(
+                state["run_id"],
+                _as_int(state.get("attempt_count"), 1),
+                "career_planning_agent",
+                payload,
+            )
+        except Exception:  # noqa: BLE001 - checkpointing is best-effort
+            logger.debug(
+                "career_planning_agent checkpoint save failed for run %s",
+                state["run_id"],
+                exc_info=True,
+            )
+        return output
+
+    def _restore_candidate_checkpoint(
+        self,
+        frozen: dict[str, object],
+        state: PlanningState,
+    ) -> NodeOutput[
+        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
+    ] | None:
+        try:
+            candidate = PlanCandidate.model_validate(frozen["candidate"])
+            raw_catalog = frozen["evidence_catalog"]
+            catalog = [
+                EvidenceCatalogItem.model_validate(item)
+                for item in (raw_catalog if isinstance(raw_catalog, list) else [])
+            ]
+            visibility = EvidenceVisibility.model_validate(frozen["visibility"])
+            fallback_reason = frozen.get("fallback_reason")
+            if fallback_reason is not None:
+                state["fallback_reason"] = str(fallback_reason)
+            usage = ProviderUsage.model_validate(frozen["usage"])
+            return NodeOutput(
+                (
+                    candidate,
+                    catalog,
+                    visibility,
+                    _as_int(frozen.get("tool_round")),
+                    _as_int(frozen.get("tool_call_count")),
+                ),
+                NodeTelemetry(
+                    trace_data={
+                        "checkpoint_reused": True,
+                        "checkpoint_attempts_saved": _as_int(frozen.get("attempt")),
+                    },
+                    tokens_in=usage.tokens_in,
+                    tokens_out=usage.tokens_out,
+                    cost_cny=usage.cost_cny,
+                    model_id=usage.model_id,
+                ),
+            )
+        except (KeyError, ValidationError, ValueError):
+            # Corrupt or schema-drifted checkpoint: fall through to a
+            # fresh generation rather than failing the Run.
+            logger.debug(
+                "career_planning_agent checkpoint rejected for run %s",
+                state["run_id"],
+                exc_info=True,
+            )
+            return None
+
+    async def _generate_candidate_uncached(
+        self,
+        state: PlanningState,
+        step_id: UUID,
+    ) -> NodeOutput[
+        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
+    ]:
         context = state["planning_context"]
         mode = state["intent"].replan_mode
         evidence_catalog = list(state.get("evidence_catalog", []))
@@ -806,34 +971,50 @@ class FixedPlanningGraph:
             if force_final:
                 raise StructuredOutputError("Tool requested after Tool budget was exhausted")
             tool_round += 1
-            for call in turn.tool_calls:
-                if tool_call_count >= state["runtime_config"].max_tool_calls:
-                    break
-                tool_call_count += 1
-                execution = await self._tool_registry.execute(
-                    tool_name=call.name,
-                    arguments=call.arguments,
-                    context=ToolContext(
-                        run_id=state["run_id"],
-                        user_id=state["user_id"],
-                        goal_type=context.profile.goal_type,
-                        intent=state["intent"].intent,
-                        requires_fresh_information=(state["intent"].requires_fresh_information),
-                        remaining_deadline_ms=int(self._budget.remaining_seconds() * 1000),
-                    ),
-                    step_id=step_id,
-                    round_number=tool_round,
+            # Parallel tool calls: every accepted call in one round runs
+            # concurrently (the registry opens its own session per call).
+            # gather preserves submission order, so evidence collection and
+            # mock determinism are unchanged; a tool failure arrives as a
+            # non-successful ToolExecutionResult, never as an exception.
+            remaining_calls = (
+                state["runtime_config"].max_tool_calls - tool_call_count
+            )
+            accepted = [call for call in turn.tool_calls[:remaining_calls]]
+            tool_call_count += len(accepted)
+            if accepted:
+                deadline_ms = int(self._budget.remaining_seconds() * 1000)
+                tool_context = ToolContext(
+                    run_id=state["run_id"],
+                    user_id=state["user_id"],
+                    goal_type=context.profile.goal_type,
+                    intent=state["intent"].intent,
+                    requires_fresh_information=(state["intent"].requires_fresh_information),
+                    remaining_deadline_ms=deadline_ms,
                 )
-                if execution.success:
-                    for item in execution.result.evidence:
-                        catalog_item = EvidenceCatalogItem.model_validate(
-                            item.model_dump(mode="json")
+                executions = await asyncio.gather(
+                    *(
+                        self._tool_registry.execute(
+                            tool_name=call.name,
+                            arguments=call.arguments,
+                            context=tool_context,
+                            step_id=step_id,
+                            round_number=tool_round,
                         )
-                        if all(
-                            existing.kind != catalog_item.kind or existing.id != catalog_item.id
-                            for existing in evidence_catalog
-                        ):
-                            evidence_catalog.append(catalog_item)
+                        for call in accepted
+                    )
+                )
+                for execution in executions:
+                    if execution.success:
+                        for item in execution.result.evidence:
+                            catalog_item = EvidenceCatalogItem.model_validate(
+                                item.model_dump(mode="json")
+                            )
+                            if all(
+                                existing.kind != catalog_item.kind
+                                or existing.id != catalog_item.id
+                                for existing in evidence_catalog
+                            ):
+                                evidence_catalog.append(catalog_item)
         if total_usage is None:
             raise StructuredOutputError("Agent produced no turn")
         state["fallback_reason"] = "tool_round_exhausted"
