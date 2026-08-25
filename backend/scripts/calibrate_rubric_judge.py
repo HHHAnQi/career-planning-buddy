@@ -99,6 +99,15 @@ def main() -> int:
         )
         rho = spearman_rho(human_scores, judge_scores)
         agreement = banded_agreement(human_scores, judge_scores)
+        # kappa/rho are UNDEFINED when both raters are constant: 0.0 there
+        # is a statistical artifact, not disagreement. With perfect
+        # agreement the dimension is calibrated without variance — it
+        # lacks discriminative data and is surfaced explicitly instead of
+        # silently blocking the overall verdict.
+        if len(set(human_scores)) == 1 and agreement == 1.0:
+            verdict = "calibrated_no_variance"
+        else:
+            verdict = calibration_verdict(kappa=kappa, rho=rho, agreement=agreement)
         report["dimensions"][dimension] = {
             "pairs": len(human_scores),
             "cohens_kappa": round(kappa, 4),
@@ -106,9 +115,7 @@ def main() -> int:
             "band_agreement": round(agreement, 4),
             "human_mean": round(sum(human_scores) / len(human_scores), 2),
             "judge_mean": round(sum(judge_scores) / len(judge_scores), 2),
-            "verdict": calibration_verdict(
-                kappa=kappa, rho=rho, agreement=agreement
-            ),
+            "verdict": verdict,
         }
 
     scored = [
@@ -117,7 +124,11 @@ def main() -> int:
     ]
     report["overall_verdict"] = (
         "calibrated"
-        if scored and all(entry["verdict"] == "calibrated" for entry in scored)
+        if scored
+        and all(
+            entry["verdict"] in {"calibrated", "calibrated_no_variance"}
+            for entry in scored
+        )
         else "diagnostic_only"
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
