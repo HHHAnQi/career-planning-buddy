@@ -112,6 +112,20 @@ async def generate() -> int:
         })
         print(f"  {case['case_id']} ✓")
 
+
+    return rows
+
+
+def main() -> int:
+    asyncio.run(generate())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+def _write_outputs(rows: list[dict[str, object]]) -> None:
     OUTPUT_JSONL.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT_JSONL.open("w", encoding="utf-8") as f:
         for row in rows:
@@ -139,13 +153,3 @@ async def generate() -> int:
 
     print(f"\n{len(rows)} rows → {OUTPUT_JSONL}")
     print(f"Excel CSV → {OUTPUT_CSV}")
-    return len(rows)
-
-
-def main() -> int:
-    asyncio.run(generate())
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

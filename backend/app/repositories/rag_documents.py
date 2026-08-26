@@ -88,17 +88,25 @@ class RagDocumentRepository:
         limit: int,
         channel_k: int = 50,
         mode: str = "hybrid",
+        doc_kinds: list[str] | None = None,
     ) -> list[HybridSearchRow]:
         """Fuse pgvector and pg_trgm rankings with RRF; user-isolated.
 
         ``mode`` selects the recall channels for retrieval evaluation:
         ``hybrid`` (default), ``vector`` (semantic only), ``lexical``
-        (pg_trgm only).
+        (pg_trgm only). ``doc_kinds`` optionally pre-filters the corpus
+        by document type (resume/job_target) BEFORE retrieval — industry
+        practice for narrowing the search space (filter governs
+        eligibility, rank governs relevance).
         """
         # pgvector's HNSW default ef_search=40 silently truncates recall;
         # industry practice is 100-200 (pgvector docs, Qdrant benchmarks).
         # Session-scoped: affects only queries on this connection.
         await self._session.execute(text("SET LOCAL hnsw.ef_search = 200"))
+
+        base_filters = [RagDocumentChunk.user_id == user_id]
+        if doc_kinds:
+            base_filters.append(RagDocumentChunk.doc_kind.in_(doc_kinds))
 
         vector_ranks: dict[UUID, int] = {}
         if query_vector is not None and mode in {"hybrid", "vector"}:
@@ -106,7 +114,7 @@ class RagDocumentRepository:
             vector_rows = await self._session.scalars(
                 select(RagDocumentChunk)
                 .where(
-                    RagDocumentChunk.user_id == user_id,
+                    *base_filters,
                     RagDocumentChunk.embedding.is_not(None),
                 )
                 .order_by(distance)
@@ -119,7 +127,7 @@ class RagDocumentRepository:
         if mode in {"hybrid", "lexical"}:
             lexical_rows = await self._session.scalars(
                 select(RagDocumentChunk)
-                .where(RagDocumentChunk.user_id == user_id)
+                .where(*base_filters)
                 .order_by(func.similarity(RagDocumentChunk.content, query_text).desc())
                 .limit(channel_k)
             )
@@ -133,7 +141,7 @@ class RagDocumentRepository:
             chunk.id: chunk
             for chunk in await self._session.scalars(
                 select(RagDocumentChunk).where(
-                    RagDocumentChunk.user_id == user_id,
+                    *base_filters,
                     RagDocumentChunk.id.in_(candidates),
                 )
             )
