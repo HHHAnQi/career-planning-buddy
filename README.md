@@ -40,24 +40,16 @@ Frozen datasets, deterministic graders, CI hard gates. Current numbers on the de
 
 | Evaluation | Dataset | Result |
 |---|---|---|
-| Intent routing (rule router `intent-rule-v3`) | `intent-routing-v1` (23 cases) | 23/23 = 100% |
-| Stage 5 planning/repair/replan/safety | `stage5-v1` (30 cases, 11 graders) | 30/30 = 100% |
-| Stage 5 via Eval V2 hard gates | `stage5-v1`, 1 trial/case | hard-gate pass fraction 1.0, first-attempt success 1.0 |
-| Stage 6 memory/context selection | `stage6-memory-context-v1` (12 cases) | 12/12 = 100% |
-| Document retrieval (bge-m3 embeddings) | `retrieval-v1` (10 cases, corpus-level) | vector Recall@5 1.0 / MRR 1.0; hybrid 0.85/0.90; lexical 0.85 |
-| Live operations (real GLM-4.7, dev deployment) | 58 persisted Runs | 89.7% completed / 10.3% degraded (business-repair fallbacks); latency P50 25.4s / P95 72.2s; tokens 135K in / 76K out |
-| **stage5 live baseline (GLM-4.7, k=3)** | 30 cases × 3 trials = 90 live Runs | **hard gates 72.2%**; first-attempt success 73.3% (95% CI 55.6–85.8); pass^3 70.0%; 21 cases 3/3, 8 cases 0/3 (tool-calling, format-repair, and replan paths); P50 26.1s / P95 47.0s |
+| 意图路由（规则路由 `intent-rule-v3`） | `intent-routing-v1`（23 例） | 23/23 = 100% |
+| Stage 5 规划/修复/重规划/安全 | `stage5-v1`（30 例，11 个 Grader） | 30/30 = 100% |
+| Stage 5（Eval V2 全硬门禁） | `stage5-v1`，每例 1 trial | 硬门禁通过率 1.0，首试成功率 1.0 |
+| Stage 6 记忆/上下文选择 | `stage6-memory-context-v1`（12 例） | 12/12 = 100% |
+| 文档检索（bge-m3 + bge-reranker） | `retrieval-v1`（10 例，语料级） | 纯向量 Recall@5 1.0；混合+真实重排 0.95 / MRR 1.00 / nDCG 0.96；混合 0.85；词法 0.85 |
+| 真实运行（GLM-4.7，开发部署） | 58 条持久化 Run | 完成 89.7% / 降级 10.3%（业务修复路径）；延迟 P50 25.4s / P95 72.2s；token 输入 13.5 万 / 输出 7.6 万 |
+| **stage5 真实基线（GLM-4.7，k=3）** | 30 例 × 3 trial = 90 次真实运行 | **硬门禁 72.2%**；首试成功率 73.3%（95%CI 55.6–85.8）；pass^3 70.0%；21 例 3/3 全过、8 例 0/3 全败（集中在工具调用与修复/重规划路径）；P50 26.1s / P95 47.0s |
+| 回归测试 | backend tests | 790+ passing（schema/service/repository/API/runtime/eval） |
 
-Retrieval evaluation (`python -m scripts.run_retrieval_eval`) compares
-vector / lexical / hybrid / hybrid+rerank modes on the frozen golden set.
-With local bge-m3 embeddings the semantic channel alone reaches
-Recall@5 1.0; RRF hybrid fusion trades a little precision for lexical
-robustness; the deterministic Mock reranker degrades ranking (0.60) —
-production uses the TEI bge-reranker service (`RERANK_PROVIDER=tei`).
-With the hash-based Mock embedding the vector channel is noise
-(lexical-only 0.85) — the report records the provider, so every number is
-reproducible against its own configuration.
-| Regression suite | backend tests | 730+ passing (schema/service/repository/API/runtime/eval) |
+检索评测（`python -m scripts.run_retrieval_eval`）在冻结 golden set 上对比纯向量/词法/混合/混合+重排四种模式（bge-m3 向量 + GPU bge-reranker-v2-m3 重排）：纯向量 Recall@5 1.0；**混合+真实重排 0.95 / MRR 1.00 / nDCG@5 0.96**——重排把 RRF 融合的排序修正到首位命中率 100%（MRR 1.0），同时保留混合召回的鲁棒性。对照：确定性 Mock 重排只有 0.60（词法打分无法识别语义相关），验证了生产必须用真实 reranker（`RERANK_PROVIDER=tei`，兼容 HuggingFace TEI 协议的 GPU 服务）。报告记录 Provider，每个数字都可对照自己的配置复现。失败用例自动导出为结构化 bad case（`backend/evals/bad_cases/`），支持复现与归因。
 
 Failed cases are exported automatically to `backend/evals/bad_cases/` as structured JSONL (runtime failures and hard-gate misses; user-cancelled trials are excluded) for reproduction and root-causing.
 
