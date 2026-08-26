@@ -34,8 +34,8 @@ plan_provenance 五标签（model_pass / format_repair / deterministic_repair / 
 ### 4. 混合检索的完整 trade-off 记录
 pgvector 余弦 + pg_trgm 关键词、RRF 融合、GPU rerank、"宽检索窄重排"（召回 50 重排 20）、相对可答性门控（top ≥ 5× 中位数）。踩过的坑都有结论：改写查询污染 reranker 输入→原始查询进 rerank；rerank 在改写查询上退化→文档化为适用边界而非硬伤。负例门控准确率、MRR、Wilson 置信区间齐全。
 
-### 5. 上下文三级压缩（不是截断）
-相关性召回（高相关老任务提升回保留区，对抗 recency bias）→ 动态 token 预算（超预算阶梯收缩到地板）→ 摘要式折叠（完成项/阻碍/调整模式结构化聚合）。全程确定性 0 LLM 调用，每次压缩留观测日志。
+### 5. 上下文三级压缩（不是截断，且相关性是混合语义的）
+混合语义相关性召回（0.5×bigram + 0.5×embedding 余弦，同义改写回归测试背书；embedding 失败自动降级纯词面）（高相关老任务提升回保留区，对抗 recency bias）→ 动态 token 预算（超预算阶梯收缩到地板）→ 摘要式折叠（完成项/阻碍/调整模式结构化聚合）。全程确定性 0 LLM 调用，每次压缩留观测日志。
 
 ### 6. 生产级运行时骨架
 SSE 断线恢复（Last-Event-ID + DB 原子事件序号）、崩溃恢复（lease/heartbeat/attempt fencing + checkpoint 输入指纹，恢复不重复烧钱）、BudgetGuard 四重硬限（调用数/token/deadline/取消令牌）、固定窗口限流、Prometheus 指标、三级 trace 关联、RAG 文档入库前注入防御。

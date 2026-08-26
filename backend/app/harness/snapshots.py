@@ -50,7 +50,11 @@ class SnapshotService:
             # own HTTP timeout and BudgetGuard enforces the remaining total.
             llm_node_timeout = float(settings.agent_deadline_seconds)
             node_timeouts["career_planning_agent"] = llm_node_timeout
-            node_timeouts["revise_or_fallback"] = llm_node_timeout
+            # The repair node must not inherit the FULL run deadline: a
+            # second full generation on top of the first is what pushed
+            # repair-03 to 61s (SLO breach). Cap it at 30s or 40% of the
+            # remaining deadline, whichever is smaller.
+            node_timeouts["revise_or_fallback"] = min(llm_node_timeout, 30.0)
             node_timeouts["interview_generate"] = llm_node_timeout
         return RuntimeConfigSnapshot(
             graph_version=identity.graph_version,
@@ -77,6 +81,8 @@ class SnapshotService:
             node_timeouts_seconds=node_timeouts,
             memory_semantic_retrieval_enabled=(settings.memory_semantic_retrieval_enabled),
             memory_disabled=settings.memory_disabled,
+            business_repair_llm_enabled=settings.business_repair_llm_enabled,
+            context_fanout_enabled=settings.context_fanout_enabled,
             memory_retrieval_limit=settings.memory_retrieval_limit,
             memory_context_max_items=settings.memory_context_max_items,
             memory_context_max_chars=settings.memory_context_max_chars,

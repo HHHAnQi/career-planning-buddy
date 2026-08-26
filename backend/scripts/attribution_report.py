@@ -131,6 +131,11 @@ async def build_report(experiment_id: str | None) -> dict[str, object]:
         ),
         "unknown_rule_backlog": dict(unknown_rules),
         "llm_violation_categories": dict(llm_categories),
+        # Sunset criterion input for the LLM repair call (SLO v1.4):
+        # rescue rate = llm_repair provenance among hard-gate passes.
+        "llm_repair_calls": pass_split.get("llm_repair", 0)
+        + fail_split.get("llm_repair", 0),
+        "llm_repair_rescued": pass_split.get("llm_repair", 0),
         # Iteration loop: any unknown code seen >=3 times in one experiment
         # is a promotion candidate for the deterministic rule base.
         "rule_promotion_candidates": {
@@ -181,6 +186,19 @@ def render(report: dict[str, object]) -> str:
         lines += ["", "LLM 违规类型归类分布:"]
         for label, count in sorted(categories.items(), key=lambda kv: -kv[1]):
             lines.append(f"  {label:<32} {count:>4}")
+    calls = report.get("llm_repair_calls", 0)
+    rescued = report.get("llm_repair_rescued", 0)
+    rate = rescued / calls if calls else None
+    lines += [
+        "",
+        f"LLM 修复调用: {calls} 次，救回 {rescued} 次"
+        + (f"（rescue rate {rate:.1%}）" if calls else ""),
+    ]
+    if calls and rate is not None and rate < 0.05:
+        lines.append(
+            "  → 已触发下线判据（<5%）：建议 BUSINESS_REPAIR_LLM_ENABLED=false，"
+            "仅在 backlog 出现新高频未知码时脉冲开启做归类采样"
+        )
     return "\n".join(lines)
 
 

@@ -34,7 +34,15 @@ ALLOWED_KINDS = frozenset({
     EvidenceKind.REPAIR_SIGNAL,
     EvidenceKind.PROVIDER_CALL_PROJECTION,
     EvidenceKind.EXPECTED_CITATIONS_MAP,
+    EvidenceKind.TASK_PROJECTION,
 })
+
+
+def _text_bigrams(text: str) -> set[str]:
+    normalized = "".join(text.split()).lower()
+    if len(normalized) < 2:
+        return set()
+    return {normalized[i : i + 2] for i in range(len(normalized) - 1)}
 
 
 def _boolean_grade(
@@ -202,6 +210,75 @@ async def grade(outcome: RunOutcome, view: AuthorizedView, expected: EvalCase) -
 
     # 4. token_usage_nonzero -- quality (soft). Mock provider should still emit >0 tokens.
     total = outcome.total_tokens_in + outcome.total_tokens_out
+    # memory_grounded -- quality signal (hard_gate=False): the plan TEXT must
+    # actually use the planted Personal memories, not merely have the
+    # memory tool invoked. Closes the ablation gap where the memory layer's
+    # measured value was tool-matching only (risk item #3).
+    memories = [
+        str(item.get("content", "")).strip()
+        for item in as_dict_list(expected.scenario.confirmed_memories)
+        if str(item.get("category", "relevant")) == "relevant"
+        and str(item.get("content", "")).strip()
+    ]
+    if not memories:
+        results.append(_not_applicable(
+            "memory_grounded", [],
+            "case plants no relevant memories",
+        ))
+    elif plan_item is None or not plan_item.projection:
+        results.append(_not_applicable(
+            "memory_grounded", [],
+            "no plan projection to verify grounding against",
+        ))
+    else:
+        plan_text = " ".join(
+            str(part)
+            for part in (
+                plan_item.projection.get("summary"),
+                plan_item.projection.get("rationale"),
+            )
+            if part
+        )
+        for task_item in view.items(EvidenceKind.TASK_PROJECTION):
+            projection = getattr(task_item, "projection", None) or {}
+            plan_text += " " + " ".join(
+                str(part)
+                for part in (
+                    projection.get("title"),
+                    projection.get("deliverable"),
+                    projection.get("starter_action"),
+                )
+                if part
+            )
+        plan_bigrams = _text_bigrams(plan_text)
+        grounded = 0
+        for memory in memories:
+            memory_bigrams = _text_bigrams(memory)
+            if not memory_bigrams:
+                continue
+            hit = len(memory_bigrams & plan_bigrams) / len(memory_bigrams)
+            if hit >= 0.10:
+                grounded += 1
+        need = max(1, (len(memories) + 1) // 2)
+        results.append(GradeResult(
+            grader_name=f"{GRADER_NAME_PREFIX}.memory_grounded",
+            grader_version=GRADER_VERSION,
+            domain="model",
+            metric_type="boolean",
+            passed=grounded >= need, hard_gate=False,
+            evidence_item_ids=[plan_id] if plan_id else [],
+            evidence={
+                "grounded_count": grounded,
+                "planted_count": len(memories),
+                "required": need,
+                "subgrader": "memory_grounded",
+            },
+            rationale=(
+                "at least half of the planted Personal memories must leave "
+                "lexical traces in the plan text (bigram hit ratio >= 0.10)"
+            ),
+        ))
+
     results.append(_numeric_grade(
         name="token_usage_nonzero",
         score=float(total),

@@ -142,6 +142,15 @@ class Settings(BaseSettings):
     # (planning catalog AND the memory_lookup tool) for controlled
     # experiments that measure the memory layer's contribution.
     memory_disabled: bool = False
+    # LLM business-rule repair switch. Sunset criterion (docs/standards/
+    # slo.md v1.4): rolling rescue rate (llm_repair provenance among
+    # hard-gate passes) < 5% over 100 calls -> disable. Remaining role is
+    # a violation_category probe, re-enabled in pulses when a new unknown
+    # rule code appears in the backlog.
+    business_repair_llm_enabled: bool = True
+    # LangGraph context fan-out: false runs the memory branch serially
+    # inside the evidence branch (A/B measurement or degraded operation).
+    context_fanout_enabled: bool = True
     memory_retrieval_limit: int = Field(default=8, ge=1, le=20)
     memory_context_max_items: int = Field(default=5, ge=1, le=5)
     memory_context_max_chars: int = Field(default=1200, ge=100, le=10000)

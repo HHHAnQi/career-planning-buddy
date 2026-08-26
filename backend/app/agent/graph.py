@@ -80,6 +80,32 @@ from app.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
+class _NoOpLock:
+    """Lock substitute for pooled (engine-bound) session factories."""
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+def _factory_binds_single_connection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> bool:
+    """True when every session from this factory shares ONE connection.
+
+    Engine-bound factories draw from the pool (safe to skip the loader
+    lock); a factory bound directly to an AsyncConnection (test harness)
+    multiplexes one wire and must serialize transactions.
+    """
+
+    bind = getattr(session_factory, "kw", {}).get("bind")
+    from sqlalchemy.engine import Engine
+
+    return not isinstance(bind, Engine)
+
+
 def _planning_input_fingerprint(
     message: str,
     context: PlanningContext,
@@ -154,11 +180,15 @@ class FixedPlanningGraph:
     ) -> None:
         self._session_factory = session_factory
         self._checkpoints = CheckpointStore(session_factory)
-        # Serializes DB transaction phases of the parallel context loaders:
-        # required for single-connection runtimes (tests), while the
-        # network-bound embedding phase stays outside the lock so the two
-        # branches still genuinely overlap on engine-pooled deployments.
-        self._context_db_lock = asyncio.Lock()
+        # Serializes DB transaction phases of the parallel context loaders
+        # ONLY on single-connection runtimes (session factory bound to a
+        # Connection instead of a pooled Engine): concurrent savepoint
+        # transactions on one connection corrupt each other. On pooled
+        # deployments the lock is skipped entirely — the decision is made
+        # from the factory's bind type at construction time, not by policy.
+        self._context_db_lock = (
+            asyncio.Lock() if _factory_binds_single_connection(session_factory) else _NoOpLock()
+        )
         self._provider = provider
         self._nodes = node_runner
         self._finalizer = finalizer
@@ -394,12 +424,38 @@ class FixedPlanningGraph:
                     "interview_training_actions": history.interview_training_actions,
                 }
             )
+            # Hybrid relevance: embed the older tasks' surfaces (one
+            # batched call) and reuse the memory branch's query vector so
+            # synonym rewrites score semantically, not just lexically.
+            # Best-effort: on any embedding failure the compressor falls
+            # back to pure lexical scoring.
+            task_vectors: dict[int, list[float]] | None = None
+            older_surfaces = [
+                " ".join(
+                    part
+                    for part in (task.deliverable, task.abandoned_reason_text or "")
+                    if part
+                )
+                for task in history.recent_tasks[config.context_recent_tasks_budget:]
+            ]
+            if memory_parcel.query_vector is not None and older_surfaces:
+                try:
+                    embedded = await self._embedding_provider.embed(
+                        older_surfaces[:32]
+                    )
+                    task_vectors = {
+                        index: vector for index, vector in enumerate(embedded)
+                    }
+                except Exception:
+                    task_vectors = None
             compression = compress_context_history(
                 context,
                 recent_tasks_budget=config.context_recent_tasks_budget,
                 recent_reviews_budget=config.context_recent_reviews_budget,
                 focus_query=state["request"].message,
                 max_context_tokens=config.max_input_tokens_per_call,
+                query_vector=memory_parcel.query_vector,
+                task_vectors=task_vectors,
             )
             context = compression.context
             if compression.promoted_task_count or compression.budget_shrink_steps:
@@ -612,6 +668,11 @@ class FixedPlanningGraph:
         (a list means fan-out — every listed node runs concurrently)."""
         branch = FixedPlanningGraph._after_intent(state)
         if branch == "ready":
+            config = state.get("runtime_config")
+            if config is not None and not config.context_fanout_enabled:
+                # Serial A/B mode: only the evidence branch runs; it loads
+                # memory inline inside its own lock section.
+                return ["evidence_loader"]
             return ["memory_loader", "evidence_loader"]
         return branch
 
@@ -671,10 +732,13 @@ class FixedPlanningGraph:
             adjustment_request=adjustment_request,
         )
         vector: list[float] | None = None
+        embed_latency_ms = 0
         if config.memory_semantic_retrieval_enabled and query:
             try:
+                _embed_started = monotonic()
                 vectors = await self._embedding_provider.embed([query])
                 vector = vectors[0] if vectors else None
+                embed_latency_ms = int((monotonic() - _embed_started) * 1000)
             except Exception:
                 vector = None
 
@@ -737,6 +801,8 @@ class FixedPlanningGraph:
                 fallback_used=memory_selection.fallback_used,
                 retrieval_failed=memory_selection.retrieval_failed,
                 retrieval_latency_ms=int((monotonic() - started) * 1000),
+                embed_latency_ms=embed_latency_ms,
+                query_vector=vector,
             )
             return await self._immediate(
                 {"memory_parcel": parcel},
@@ -747,6 +813,7 @@ class FixedPlanningGraph:
                     "fallback_used": parcel.fallback_used,
                     "retrieval_failed": parcel.retrieval_failed,
                     "retrieval_latency_ms": parcel.retrieval_latency_ms,
+                    "embed_latency_ms": parcel.embed_latency_ms,
                 },
             )
 
@@ -876,6 +943,17 @@ class FixedPlanningGraph:
 
         async def work() -> NodeOutput[dict[str, object]]:
             parcel = await load()
+            if not state["runtime_config"].context_fanout_enabled:
+                # Serial A/B mode: this branch also produces the memory
+                # parcel so the merge node is unchanged.
+                memory_result = await self._memory_loader_node(state)
+                return await self._immediate(
+                    {
+                        "history_parcel": parcel,
+                        "memory_parcel": memory_result["memory_parcel"],
+                    },
+                    {"serial_context_mode": True},
+                )
             return await self._immediate(
                 {"history_parcel": parcel},
                 {
@@ -1012,6 +1090,11 @@ class FixedPlanningGraph:
         (a list means fan-out — every listed node runs concurrently)."""
         branch = FixedPlanningGraph._after_intent(state)
         if branch == "ready":
+            config = state.get("runtime_config")
+            if config is not None and not config.context_fanout_enabled:
+                # Serial A/B mode: only the evidence branch runs; it loads
+                # memory inline inside its own lock section.
+                return ["evidence_loader"]
             return ["memory_loader", "evidence_loader"]
         return branch
 
@@ -1140,6 +1223,11 @@ class FixedPlanningGraph:
         (a list means fan-out — every listed node runs concurrently)."""
         branch = FixedPlanningGraph._after_intent(state)
         if branch == "ready":
+            config = state.get("runtime_config")
+            if config is not None and not config.context_fanout_enabled:
+                # Serial A/B mode: only the evidence branch runs; it loads
+                # memory inline inside its own lock section.
+                return ["evidence_loader"]
             return ["memory_loader", "evidence_loader"]
         return branch
 
@@ -1608,6 +1696,16 @@ class FixedPlanningGraph:
             ),
             evidence_catalog=list(state.get("evidence_catalog", [])),
         )
+        if not state["runtime_config"].business_repair_llm_enabled:
+            # Sunset criterion fired (see config docs): the LLM repair call
+            # is disabled; degrade straight to the deterministic template.
+            fallback = fallback_candidate(context, state["intent"].replan_mode)
+            _, visibility = build_evidence_visibility(
+                call_id=f"{state['run_id']}:business_repair_disabled",
+                evidence_catalog=[],
+            )
+            return NodeOutput((fallback, "business_repair_disabled", visibility))
+
         AGENT_REPAIR_PATH.inc(
             make_labels(path="llm_unknown" if unknown_codes else "llm")
         )

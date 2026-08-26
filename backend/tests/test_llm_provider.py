@@ -257,7 +257,10 @@ def test_provider_factory_switches_explicitly_without_fallback() -> None:
         "openai_compatible_plan_stage6_week_schedule_v5"
     )
     assert real_snapshot.node_timeouts_seconds["career_planning_agent"] == 120.0
-    assert real_snapshot.node_timeouts_seconds["revise_or_fallback"] == 120.0
+    # The repair node is capped at 30s regardless of the run deadline —
+    # a second full generation inheriting the full deadline is what broke
+    # the 60s latency SLO (repair-03, SLO v1.4).
+    assert real_snapshot.node_timeouts_seconds["revise_or_fallback"] == 30.0
 
     mock_snapshot = SnapshotService.build_config(mock_settings)
     assert mock_snapshot.node_timeouts_seconds["career_planning_agent"] == 30

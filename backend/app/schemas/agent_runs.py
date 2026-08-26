@@ -149,6 +149,8 @@ class RuntimeConfigSnapshot(StrictModel):
     node_timeouts_seconds: dict[str, float]
     memory_semantic_retrieval_enabled: bool = True
     memory_disabled: bool = False
+    business_repair_llm_enabled: bool = True
+    context_fanout_enabled: bool = True
     memory_retrieval_limit: int = Field(default=8, ge=1, le=20)
     memory_context_max_items: int = Field(default=5, ge=1, le=5)
     memory_context_max_chars: int = Field(default=1200, ge=100, le=10000)
@@ -439,6 +441,12 @@ class MemoryParcel(StrictModel):
     fallback_used: bool = False
     retrieval_failed: bool = False
     retrieval_latency_ms: int = 0
+    # Network-bound phases, recorded for fan-out benefit measurement:
+    # the embedding call overlaps the evidence branch's DB reads.
+    embed_latency_ms: int = 0
+    # The embedded memory-query vector, reused by context compression's
+    # hybrid relevance scoring (avoids a second embedding call).
+    query_vector: list[float] | None = None
 
 
 class HistoryParcel(StrictModel):

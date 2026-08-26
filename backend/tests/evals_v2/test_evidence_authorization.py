@@ -65,6 +65,8 @@ EXPECTED_ALLOWED_KINDS = {
         EvidenceKind.REPAIR_SIGNAL,
         EvidenceKind.PROVIDER_CALL_PROJECTION,
         EvidenceKind.EXPECTED_CITATIONS_MAP,
+        # memory_grounded quality grader reads task text surfaces.
+        EvidenceKind.TASK_PROJECTION,
     }),
 }
 

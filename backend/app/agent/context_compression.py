@@ -52,23 +52,47 @@ def _bigrams(text: str) -> set[str]:
     return {normalized[i : i + 2] for i in range(len(normalized) - 1)}
 
 
-def _task_relevance(focus_bigrams: set[str], task: TaskContext) -> float:
-    """Overlap ratio between the request and a task's planning surface."""
+def _task_relevance(
+    focus_bigrams: set[str],
+    task: TaskContext,
+    *,
+    query_vector: list[float] | None = None,
+    task_vector: list[float] | None = None,
+) -> float:
+    """Hybrid relevance: 0.5 * lexical bigram overlap + 0.5 * embedding
+    cosine. Pure-bigram scoring misses synonym rewrites (跳槽/换工作);
+    the semantic half closes that gap. When either vector is missing the
+    score degrades to the lexical half only (deterministic fallback)."""
+
+    def _cosine(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(x * x for x in b) ** 0.5
+        if na == 0 or nb == 0:
+            return 0.0
+        return max(0.0, dot / (na * nb))
+
     surface = " ".join(
         part
         for part in (task.deliverable, task.abandoned_reason_text or "")
         if part
     )
     task_bigrams = _bigrams(surface)
-    if not focus_bigrams or not task_bigrams:
-        return 0.0
-    return len(focus_bigrams & task_bigrams) / len(focus_bigrams)
+    lexical = 0.0
+    if focus_bigrams and task_bigrams:
+        lexical = len(focus_bigrams & task_bigrams) / len(focus_bigrams)
+    if query_vector is None or task_vector is None:
+        return lexical
+    return 0.5 * lexical + 0.5 * _cosine(query_vector, task_vector)
 
 
 def _select_retained_tasks(
     tasks: list[TaskContext],
     budget: int,
     focus_query: str | None,
+    *,
+    query_vector: list[float] | None = None,
+    task_vectors: dict[int, list[float]] | None = None,
 ) -> tuple[list[TaskContext], list[TaskContext], int]:
     """Recency window + bounded relevance rescue from older tasks."""
     recent = tasks[:budget]
@@ -76,13 +100,20 @@ def _select_retained_tasks(
     if not older or not focus_query:
         return recent, older, 0
     focus_bigrams = _bigrams(focus_query)
-    ranked = sorted(
-        enumerate(older),
-        key=lambda pair: (-_task_relevance(focus_bigrams, pair[1]), pair[0]),
-    )
+    vectors = task_vectors or {}
+
+    def _score(index: int, task: TaskContext) -> float:
+        return _task_relevance(
+            focus_bigrams,
+            task,
+            query_vector=query_vector,
+            task_vector=vectors.get(index),
+        )
+
+    ranked = sorted(enumerate(older), key=lambda pair: (-_score(*pair), pair[0]))
     rescued: list[tuple[int, TaskContext]] = []
     for index, task in ranked[:_RELEVANCE_RESCUE_LIMIT]:
-        if _task_relevance(focus_bigrams, task) >= _RELEVANCE_RESCUE_THRESHOLD:
+        if _score(index, task) >= _RELEVANCE_RESCUE_THRESHOLD:
             rescued.append((index, task))
     if not rescued:
         return recent, older, 0
@@ -101,6 +132,8 @@ def compress_context_history(
     recent_reviews_budget: int = 2,
     focus_query: str | None = None,
     max_context_tokens: int | None = None,
+    query_vector: list[float] | None = None,
+    task_vectors: dict[int, list[float]] | None = None,
 ) -> ContextCompressionResult:
     """Compress history.
 
@@ -110,7 +143,11 @@ def compress_context_history(
     """
     before_chars = len(context.model_dump_json())
     retained_tasks, older_tasks, promoted = _select_retained_tasks(
-        context.recent_tasks, recent_tasks_budget, focus_query
+        context.recent_tasks,
+        recent_tasks_budget,
+        focus_query,
+        query_vector=query_vector,
+        task_vectors=task_vectors,
     )
     retained_reviews = context.recent_reviews[:recent_reviews_budget]
     older_reviews = context.recent_reviews[recent_reviews_budget:]

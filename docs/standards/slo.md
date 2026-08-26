@@ -22,6 +22,23 @@
   手工填报。
 - **修订历史**：v1（2026-08-26）首次定义。
 
+## 终版权威口径（2026-08-26，实验 `cd3eb74e`）
+
+**唯一报告口径 = 当前 HEAD（提交见 git log）+ 30 case × k=3 live（GLM-4.7，
+BUSINESS_REPAIR_LLM_ENABLED=false 按下线判据）**：
+
+| 指标 | 值 |
+|---|---|
+| trial 级硬门禁 | 80/90 = **88.9%** |
+| case 级 pass_at_n（3/3 全过） | 25/30 = 83.3%（失败：repair-02/04 已知 mock-scripted 无效 case、live-mem-01 2/3（模型附加工具调用致精确匹配失败，见下）、replan-01/05 各 1/3） |
+| 延迟 P50 / P95 | **20.2s / 28.6s**（修复节点 30s 独立上限 + LLM 修复下线后，P95 从 45.5–57.3s 降至 28.6s，SLO 由贴线转宽裕） |
+| 单例离群 | replan-05 73.3s（单次生成慢，非修复环叠加——修复调用已禁用） |
+| fan-out 实测收益 | embedding 均值 226ms / 峰值 983ms 与证据分支重叠（memory step DB 段仅 7ms） |
+| memory_grounded（新质量 grader，非硬门禁） | **3/9 = 33%**——诚实短板：记忆注入了上下文但模型未充分落进计划文本，下一迭代目标（prompt 强化 pinned_memories 利用） |
+
+历史数字（92.2% k=3 旧代码 / 83.3% k=1 / 93.3% k=1 重构后）仅作过程记录，
+现状以本表为准。
+
 ## 使用
 
 ```bash
@@ -71,3 +88,15 @@ dev 容器的 intake worker 会在共享库里抢新建的 pending Run（lease �
   能力强是前提而非否定——Agent 增量在记忆接地/工具/预算/可恢复性，且
   对照暴露了修复环降级模板的质量短板（repair-03/replan-05 裸模型直出
   通过而 Agent 降级失败），列为下一迭代目标。
+
+- v1.5（2026-08-26）第三轮修复批次：
+  ① `BUSINESS_REPAIR_LLM_ENABLED` 旋钮 + LLM 修复下线判据（滚动 100 次
+  rescue rate < 5% → 关闭；当前 0/6 已触发，归因报告自动输出建议）；
+  ② `revise_or_fallback` 节点独立 30s 超时上限（repair-03 61s 破线根因）；
+  ③ 上下文相关性打分升级为 bigram+embedding 混合（同义词回归测试背书）；
+  ④ fan-out 锁改为运行时判据（Connection 绑定加锁 / Engine 池免锁）+
+  `CONTEXT_FANOUT_ENABLED` 串行 A/B 模式 + `embed_latency_ms` 埋点；
+  ⑤ 新增 `model.memory_grounded` 质量 grader（非硬门禁：计划文本须命中
+  planted memory ≥ 半数，bigram 命中率 ≥ 0.10）——补齐记忆层对"规划质量"
+  贡献的度量缺口；⑥ 新增 `docs/architecture/langgraph-runtime-notes.md`
+  （五个机制点 + 踩坑实证）。
