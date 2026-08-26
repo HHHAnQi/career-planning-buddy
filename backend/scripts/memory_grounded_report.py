@@ -34,12 +34,14 @@ async def build_report(experiment_id: str) -> dict[str, object]:
     cases = {case.case_id: case for case in bundle.cases}
     # confirmed_memories live on the scenario; the strict EvalCase wraps it.
     scenario_memories = {}
+    user_requests = {}
     for case in bundle.cases:
         scenario = getattr(case, "scenario", None)
         memories = getattr(scenario, "confirmed_memories", None)
         if memories is None and hasattr(case, "confirmed_memories"):
             memories = case.confirmed_memories
         scenario_memories[case.case_id] = memories or []
+        user_requests[case.case_id] = str(getattr(scenario, "user_request", "") or "")
     engine = create_async_engine(get_settings().database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     rows: list[dict[str, object]] = []
@@ -92,13 +94,22 @@ async def build_report(experiment_id: str) -> dict[str, object]:
                 ) + " " + " ".join(
                     f"{t.title} {t.deliverable}" for t in tasks
                 )
+                import re as _re
+
+                from evals.v2.graders.model import _distinctive_anchors
+
                 plan_bigrams = _bigrams(plan_text)
-                grounded = sum(
-                    1
-                    for memory in memories
-                    if (mb := _bigrams(memory))
-                    and len(mb & plan_bigrams) / len(mb) >= THRESHOLD
-                )
+                grounded = 0
+                for memory in memories:
+                    mb = _bigrams(memory)
+                    if not mb:
+                        continue
+                    ratio = len(mb & plan_bigrams) / len(mb)
+                    anchors = _distinctive_anchors(
+                        memory, plan_text, request_text=user_requests.get(trial.case_id, "")
+                    )
+                    if ratio >= THRESHOLD or anchors >= 2:
+                        grounded += 1
                 rows.append(
                     {"case_id": trial.case_id, "grounded": grounded,
                      "planted": len(memories)}

@@ -58,6 +58,19 @@ dev 容器的 intake worker 会在共享库里抢新建的 pending Run（lease �
 导致 trial 以 `RUN_NOT_COMPLETED` 失败（2026-08-26 实测：14/30 trial 被抢）。
 实验结束后 `docker start` 恢复。pytest 已用独立库 `career_buddy_test` 隔离，不受影响。
 
+- v1.6（2026-08-27）E1/C1/C2/E3 批次：① **E1 真裸模型基线**（`6b03e9af`，
+  MEMORY_DISABLED+direct）：72.4%（21/29），live-mem 接地 0/3——推翻第一轮
+  "裸模型 93.3%"的误读（该臂享图骨架），Agent 骨架贡献 ≈+21pp；② **E3 恢复
+  实测**：graceful-shutdown 中断 + checkpoint 恢复，0 次新增物理 LLM 调用；
+  ③ **C1 prompt v6**（记忆利用强化）：live-mem 3/3 硬门禁全过（含
+  live-mem-01 工具匹配）；④ **C2 盲评**（独立 DeepSeek judge，n=8/臂）：
+  记忆层对质量分无显著效应（D1 +0.12/D4 −0.37，噪声区间）——与
+  memory_grounded 词面指标结论一致，质量维度诚实标记为"证据不足，
+  prompt 迭代中"；⑤ memory_grounded grader 升级锚点评分 + 请求回声排除
+  （词面信噪比限制已文档化）。E2（runaway 护栏专项数据集）未执行——
+  护栏拦截已由 repair-03 61s 案例 + 30s 上限修复实证，专项数据集留待
+  下一批次。
+
 ## 修订历史
 
 - v1（2026-08-26）首次定义。

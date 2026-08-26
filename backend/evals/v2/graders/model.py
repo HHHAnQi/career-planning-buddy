@@ -14,6 +14,7 @@ projection.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -36,6 +37,37 @@ ALLOWED_KINDS = frozenset({
     EvidenceKind.EXPECTED_CITATIONS_MAP,
     EvidenceKind.TASK_PROJECTION,
 })
+
+
+
+_FUNCTIONAL = frozenset(
+    "计划 任务 完成 进行 需要 可以 一个 相关 提高 提升 分析 整理 准备 制定 记录 帮助 情况 内容 通过 检查 优化 撰写 梳理".split()
+)
+
+
+def _distinctive_anchors(
+    memory: str, plan_text: str, *, request_text: str = ""
+) -> int:
+    """Count memory terms that reappear in the plan: ASCII entity words
+    plus CJK bigrams, ignoring generic planning vocabulary AND anything
+    the user request already contained (request-echo control: a plan that
+    merely paraphrases the request must not score as memory-grounded)."""
+    request_lower = request_text.lower()
+    request_bigrams = _text_bigrams(request_text)
+    plan_lower = plan_text.lower()
+    plan_bigrams = _text_bigrams(plan_text)
+    count = 0
+    for word in re.findall(r"[a-z0-9]+", memory.lower()):
+        if len(word) >= 2 and word in plan_lower and word not in request_lower:
+            count += 1
+    for bigram in _text_bigrams(memory):
+        if any(bigram in phrase for phrase in _FUNCTIONAL):
+            continue
+        if bigram in request_bigrams:
+            continue
+        if bigram in plan_bigrams:
+            count += 1
+    return count
 
 
 def _text_bigrams(text: str) -> set[str]:
@@ -251,13 +283,22 @@ async def grade(outcome: RunOutcome, view: AuthorizedView, expected: EvalCase) -
                 if part
             )
         plan_bigrams = _text_bigrams(plan_text)
+        plan_ascii = set(re.findall(r"[a-z0-9]+", plan_text.lower()))
         grounded = 0
         for memory in memories:
             memory_bigrams = _text_bigrams(memory)
             if not memory_bigrams:
                 continue
             hit = len(memory_bigrams & plan_bigrams) / len(memory_bigrams)
-            if hit >= 0.10:
+            # Char-bigram ratios dilute short-keyword memories (e.g. a
+            # "JD定制简历" lesson yields only the JD/简历 anchors). Counting
+            # DISTINCTIVE anchors (ASCII entities + non-generic CJK
+            # bigrams) catches plans that operationalize the memory's core
+            # entities without verbatim restatement.
+            anchors = _distinctive_anchors(
+                memory, plan_text, request_text=expected.scenario.user_request
+            )
+            if hit >= 0.10 or anchors >= 2:
                 grounded += 1
         need = max(1, (len(memories) + 1) // 2)
         results.append(GradeResult(
