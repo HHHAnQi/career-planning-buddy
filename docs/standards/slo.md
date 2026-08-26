@@ -24,7 +24,8 @@
 
 ## 终版权威口径（2026-08-26，实验 `cd3eb74e`）
 
-**唯一报告口径 = 当前 HEAD（提交见 git log）+ 30 case × k=3 live（GLM-4.7，
+**唯一报告口径 = 代码内容等价于 commit `97a3256`（实验 `cd3eb74e` 跑于该
+提交的工作区，内容一致）+ 30 case × k=3 live（GLM-4.7，
 BUSINESS_REPAIR_LLM_ENABLED=false 按下线判据）**：
 
 | 指标 | 值 |
@@ -32,7 +33,7 @@ BUSINESS_REPAIR_LLM_ENABLED=false 按下线判据）**：
 | trial 级硬门禁 | 80/90 = **88.9%** |
 | case 级 pass_at_n（3/3 全过） | 25/30 = 83.3%（失败：repair-02/04 已知 mock-scripted 无效 case、live-mem-01 2/3（模型附加工具调用致精确匹配失败，见下）、replan-01/05 各 1/3） |
 | 延迟 P50 / P95 | **20.2s / 28.6s**（修复节点 30s 独立上限 + LLM 修复下线后，P95 从 45.5–57.3s 降至 28.6s，SLO 由贴线转宽裕） |
-| 单例离群 | replan-05 73.3s（单次生成慢，非修复环叠加——修复调用已禁用） |
+| 单例离群 | replan-05 73.3s：同 case 姊妹 trial 20.5s 且 token 量几乎相同（2885/1039 vs 2898/991）→ 纯 provider 生成尾延迟（同量工作慢 3.5×），非重试/修复叠加（修复已禁用）。剔除 <60s 样本后 max 51.8s / P95 28.0s。已知尾行为，生产缓解方向：按 p99 感知的单调用重试（未实施，如实记录） |
 | fan-out 实测收益 | embedding 均值 226ms / 峰值 983ms 与证据分支重叠（memory step DB 段仅 7ms） |
 | memory_grounded（新质量 grader，非硬门禁） | **3/9 = 33%**——诚实短板：记忆注入了上下文但模型未充分落进计划文本，下一迭代目标（prompt 强化 pinned_memories 利用） |
 
@@ -70,6 +71,42 @@ dev 容器的 intake worker 会在共享库里抢新建的 pending Run（lease �
   （词面信噪比限制已文档化）。E2（runaway 护栏专项数据集）未执行——
   护栏拦截已由 repair-03 61s 案例 + 30s 上限修复实证，专项数据集留待
   下一批次。
+
+## 统计效力审计（2026-08-27，第二轮拷问 Q3 闭环）
+
+`scripts/confidence_report.py`（Wilson 95% CI + 两比例 z 检验）对全部头条
+数字补置信区间：
+
+| 结论 | 点估计 | 显著性 |
+|---|---|---|
+| Agent 骨架贡献（真裸 72.4% vs 全量 93.3%，k=1） | +20.9pp | **p=0.032 ✅ 显著** |
+| 记忆层贡献（OFF 80.0% vs ON 93.3%，k=1） | +13.3pp | **p=0.129 ❌ k=1 不显著（CI 跨 0，主张降级待 k=3 确认）** |
+| 权威口径 k=3 | 88.9% [80.7, 93.9] | — |
+
+制度性教训已入 `docs/standards/metric-registry.md`：无 CI 的数字不构成主张。
+
+## 记忆层成本账本（第二轮拷问 Q4，当前 30-case 世界可观测账）
+
+| 项 | 实测值 |
+|---|---|
+| 注入成本（工具路径） | 仅 live-mem 3/30 case 走 memory_lookup，结果负载 130 字符/run（≈65 token） |
+| 注入成本（pinned 通道） | 本实验 0 行（planted 记忆经工具通道流入） |
+| embedding 成本 | 226ms 均值/983ms 峰值——已被 fan-out 并行吸收 |
+| 记忆工具延迟 | 200–483ms，异步于主生成 |
+| 净 token 效应 | ON 臂输入均值反而低 9.1%（接地减少修复轮） |
+| 删除的可观测退化 | live-mem 0/3、replan 上下文丢失；硬门禁差待 k=3 CI 确认 |
+
+- v1.7（2026-08-27）第二轮拷问修复批次：① 臂配置断言
+  （`evals/v2/arm_invariants.py`：pre-trial config 校验 + 评分时轨迹校验，
+  6 项故障注入测试，"假裸臂"类错误机器层面无法存活）；② 统计效力审计
+  （`scripts/confidence_report.py`：Wilson CI + 两比例检验；记忆层 +13.3pp
+  在 k=1 不显著已如实降级，k=3 两臂补跑进行中）；③ 并发正确性三证明
+  （`tests/test_run_exclusive_concurrency.py`：锁等待不耗节点超时、
+  pool_size=1 免锁安全、4-run 并发压测全过）；④ 指标预注册制度
+  （`docs/standards/metric-registry.md`，memory_grounded 演进作为反面教材
+  永久保留）；⑤ 记忆层成本账本（注入 ≈65 token × 3 case，embedding 已被
+  并行吸收，净 token 为负）；⑥ rubric v10 D3/D4 歧义消解判例 5 条 +
+  worksheet 生成（23 行待人工标注）。
 
 ## 修订历史
 

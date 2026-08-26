@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import session_transaction
 from app.core.exceptions import AppError
 from app.harness.provider_calls.repository import ProviderCallRepository
+from app.models.agent_run import AgentRun
 from app.models.eval import (
     EvalEvidenceItem,
     EvalExperiment,
@@ -456,6 +457,7 @@ class EvalService:
                     message="Completed Trial is missing its frozen evidence catalog",
                     status_code=HTTPStatus.CONFLICT,
                 )
+            from evals.v2.arm_invariants import check_post_trial
             from evals.v2.graders.base import EvidenceKind
 
             items = [
@@ -471,6 +473,33 @@ class EvalService:
                 )
                 for row in rows
             ]
+            # Arm-configuration invariant: a misconfigured arm must fail
+            # grading loudly instead of producing a wrong-but-plausible
+            # conclusion (root cause of the first-round "fake bare" arm).
+            from evals.v2.graders.base import EvidenceKind as _EK
+
+            tool_names = [
+                str(item.projection.get("tool_name"))
+                for item in items
+                if item.kind == _EK.TOOL_CALL_PROJECTION
+                and isinstance(item.projection, dict)
+                and item.projection.get("tool_name")
+            ]
+            experiment = await self._evals.get_experiment(trial.experiment_id)
+            run = await self._session.get(AgentRun, trial.run_id)
+            violations = check_post_trial(
+                experiment.agent_variant if experiment else None,
+                dict(run.config_snapshot_json or {}) if run is not None else {},
+                tool_names,
+            )
+            if violations:
+                raise AppError(
+                    code="EVAL_ARM_INVARIANT_VIOLATED",
+                    message="; ".join(
+                        f"{v.check}: {v.detail}" for v in violations
+                    ),
+                    status_code=HTTPStatus.CONFLICT,
+                )
             results = await grade_all(
                 trial_id=trial_id,
                 outcome=outcome,

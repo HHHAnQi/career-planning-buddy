@@ -621,6 +621,22 @@ class TrialRunner:
                     )
                 if self._is_direct_llm_variant():
                     await self._apply_direct_llm_overrides(session, run_id)
+                # Pre-trial arm invariant: fail fast on a misconfigured
+                # arm BEFORE burning LLM budget on wrong-conclusion trials.
+                from evals.v2.arm_invariants import check_pre_trial
+
+                fresh = await session.get(AgentRun, run_id)
+                violations = check_pre_trial(
+                    self._runtime_context.agent_variant
+                    if self._runtime_context
+                    else None,
+                    dict(fresh.config_snapshot_json or {}) if fresh else {},
+                )
+                if violations:
+                    raise RuntimeError(
+                        "arm configuration invariant violated: "
+                        + "; ".join(f"{v.check}: {v.detail}" for v in violations)
+                    )
                 return run_id
 
     async def _apply_direct_llm_overrides(
