@@ -39,13 +39,17 @@ from app.repositories.rag_documents import RagDocumentRepository
 from app.services.rag_documents import RagDocumentService
 from evals.retrieval_metrics import summarize
 
-DATASET_PATH = "evals/datasets/retrieval-v1.jsonl"
+DEFAULT_DATASET = "retrieval-v1"
+DATASET_PATHS = {
+    "retrieval-v1": "evals/datasets/retrieval-v1.jsonl",
+    "retrieval-v2": "evals/datasets/retrieval-v2.jsonl",
+}
 MODES = ("vector", "lexical", "hybrid")
 
 
-def load_cases() -> list[dict[str, object]]:
+def load_cases(dataset: str = DEFAULT_DATASET) -> list[dict[str, object]]:
     cases: list[dict[str, object]] = []
-    with open(DATASET_PATH, encoding="utf-8") as handle:
+    with open(DATASET_PATHS[dataset], encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if line:
@@ -53,9 +57,9 @@ def load_cases() -> list[dict[str, object]]:
     return cases
 
 
-async def run(k: int) -> dict[str, object]:
+async def run(k: int, dataset: str = DEFAULT_DATASET) -> dict[str, object]:
     settings = get_settings()
-    cases = load_cases()
+    cases = load_cases(dataset)
     embedding = build_embedding_provider(settings)
     rerank = build_rerank_provider(settings)
     engine = create_async_engine(settings.database_url)
@@ -70,24 +74,34 @@ async def run(k: int) -> dict[str, object]:
                 )
                 session.add(eval_user)
                 await session.flush()
-                user_id = eval_user.id
                 service = RagDocumentService(
                     session,
                     embedding_provider=embedding,
                     rerank_provider=rerank,
                     min_rerank_score=settings.rag_min_rerank_score,
                 )
-                # Provision every document first; relevant ids are matched
-                # by golden content markers.
+                # Each case provisions its OWN isolated user: a shared
+                # user accumulates corpora across cases, and the lexical
+                # enumeration (channel_k) then misses golden chunks whose
+                # queries are deliberately paraphrased (v2 hardening).
                 query_vectors: dict[str, list[float] | None] = {}
                 provisioned: dict[str, list[object]] = {}
+                corpus_users: dict[str, object] = {}
                 for case in cases:
                     case_id = str(case["case_id"])
+                    corpus_user = User(
+                        auth_type="guest",
+                        guest_device_hash=uuid4().hex,
+                        display_name=f"retrieval-eval-{case_id}",
+                    )
+                    session.add(corpus_user)
+                    await session.flush()
+                    corpus_users[case_id] = corpus_user
                     all_chunks: list[object] = []
                     for doc in case["docs"]:  # type: ignore[index]
                         source_id = uuid4()
                         await service.ingest_document(
-                            user_id=user_id,
+                            user_id=corpus_user.id,
                             doc_kind=str(doc["doc_kind"]),
                             source_id=source_id,
                             title=str(doc["title"]),
@@ -95,7 +109,7 @@ async def run(k: int) -> dict[str, object]:
                         )
                     repository = RagDocumentRepository(session)
                     rows = await repository.hybrid_search(
-                        user_id=user_id,
+                        user_id=corpus_user.id,
                         query_text=str(case["query"]),
                         query_vector=None,
                         limit=200,
@@ -128,12 +142,14 @@ async def run(k: int) -> dict[str, object]:
                             )
                         if mode == "hybrid_rerank":
                             outcome = await service.search(
-                                user_id=user_id, query=str(case["query"]), limit=k
+                                user_id=corpus_users[case_id].id,  # type: ignore[attr-defined]
+                                query=str(case["query"]),
+                                limit=k,
                             )
                             ranked = [result.chunk.id for result in outcome.results]
                         else:
                             rows = await repository.hybrid_search(
-                                user_id=user_id,
+                                user_id=corpus_users[case_id].id,
                                 query_text=str(case["query"]),
                                 query_vector=query_vectors[case_id],
                                 limit=k,
@@ -144,7 +160,7 @@ async def run(k: int) -> dict[str, object]:
                     results[mode] = summarize(per_case, k=k)
 
                 return {
-                    "dataset": "retrieval-v1",
+                    "dataset": dataset,
                     "case_count": len(cases),
                     "k": k,
                     "embedding_provider": embedding.provider_name,
@@ -163,8 +179,9 @@ async def run(k: int) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--dataset", choices=list(DATASET_PATHS), default=DEFAULT_DATASET)
     arguments = parser.parse_args()
-    report = asyncio.run(run(arguments.k))
+    report = asyncio.run(run(arguments.k, arguments.dataset))
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 
