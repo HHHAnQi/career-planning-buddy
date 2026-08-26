@@ -1,4 +1,4 @@
-"""Standard retrieval metrics: Recall@K, MRR, nDCG@K.
+"""Standard retrieval metrics: Recall@K, Precision@K, MRR, nDCG@K, Gate Accuracy.
 
 Pure functions over (ranked result ids, relevant id set) so they are
 reusable by tests, the retrieval eval runner, and CI gates.
@@ -24,13 +24,51 @@ def _validate(ranked: Sequence[Hashable], relevant: set[Hashable]) -> None:
 def recall_at_k(
     ranked: Sequence[Hashable], relevant: set[Hashable], k: int
 ) -> float:
-    """|relevant ∩ top-k| / |relevant|."""
+    """|relevant ∩ top-k| / |relevant| — did we FIND the golden?"""
 
     _validate(ranked, relevant)
     if k <= 0:
         return 0.0
     top_k = set(ranked[:k])
     return len(top_k & relevant) / len(relevant)
+
+
+def precision_at_k(
+    ranked: Sequence[Hashable], relevant: set[Hashable], k: int
+) -> float:
+    """|relevant ∩ top-k| / k — how CLEAN is the top-K we send to the LLM?
+
+    High precision = fewer wasted context tokens and lower hallucination
+    risk. With 1 golden in a K=5 result set, max precision is 1/5 = 0.2;
+    the complement (1 - P@K) measures the noise fraction.
+    """
+
+    _validate(ranked, relevant)
+    if k <= 0:
+        return 0.0
+    top_k = set(ranked[:k])
+    return len(top_k & relevant) / min(k, len(ranked) or 1)
+
+
+def gate_accuracy(
+    ranked: Sequence[Hashable],
+    relevant: set[Hashable],
+    *,
+    sufficient: bool,
+) -> bool:
+    """Whether the sufficiency decision was CORRECT for this case.
+
+    A gate that says sufficient=False when the golden IS retrievable is
+    a false rejection (user sees 'no information' when an answer exists).
+    A gate that says sufficient=True when NO golden exists is a false
+    acceptance (garbage context sent to the LLM). This metric catches both.
+    """
+
+    _validate(ranked, relevant)
+    golden_retrievable = bool(ranked)
+    if golden_retrievable:
+        return sufficient  # should have been True
+    return not sufficient  # should have been False
 
 
 def mrr(ranked: Sequence[Hashable], relevant: set[Hashable]) -> float:
@@ -76,13 +114,17 @@ def summarize(
     *,
     k: int = 5,
 ) -> dict[str, float]:
-    """Average Recall@k / MRR / nDCG@k over (ranked, relevant) cases."""
+    """Average Recall/Precision/MRR/nDCG@k over (ranked, relevant) cases."""
 
     if not cases:
         raise ValueError("cases must not be empty")
     return {
         f"recall_at_{k}": sum(
             recall_at_k(ranked, relevant, k) for ranked, relevant in cases
+        )
+        / len(cases),
+        f"precision_at_{k}": sum(
+            precision_at_k(ranked, relevant, k) for ranked, relevant in cases
         )
         / len(cases),
         "mrr": sum(mrr(ranked, relevant) for ranked, relevant in cases)

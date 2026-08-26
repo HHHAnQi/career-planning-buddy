@@ -210,6 +210,17 @@ class RagDocumentService:
                 query, [row.chunk.content for row in rerank_input]
             )
             _rerank_cache_put(cache_key, scores)
+
+        # Relative answerability gate: the sufficiency decision uses the
+        # SCORE DISTRIBUTION rather than an absolute cutoff. A clear
+        # winner (top score >> median) means real evidence exists even
+        # when absolute scores are low (paraphrase queries); a flat
+        # distribution means all chunks are equally (ir)relevant — no
+        # answer to give. Threshold: top ≥ 5× median AND top ≥ absolute
+        # floor (belt-and-suspenders against degenerate all-zero cases).
+        sorted_scores = sorted(scores, reverse=True) if scores else []
+        has_answer = _relative_gate(sorted_scores, self._min_rerank_score)
+
         ranked = sorted(
             (
                 DocumentSearchResult(
@@ -221,12 +232,12 @@ class RagDocumentService:
                 for index, (row, score) in enumerate(
                     zip(rerank_input, scores, strict=False)
                 )
-                if float(score) >= self._min_rerank_score
+                if has_answer  # when no answer: no results at all
             ),
             key=lambda item: (-item.rerank_score, item.chunk.chunk_index),
         )
         return DocumentSearchOutcome(
-            sufficient=bool(ranked), results=ranked[:limit]
+            sufficient=has_answer, results=ranked[:limit] if has_answer else []
         )
 
 
@@ -279,6 +290,44 @@ def _bypass_rerank(recalled: list[Any]) -> bool:
     gap = _confident_fusion_confidence(recalled)
     top = recalled[0].rrf_score or 0.0
     return gap > 0.3 and top > 0.02
+
+
+# Relative gate: top score must exceed the median by this ratio for the
+# system to declare "an answer exists". 5× is conservative — lower values
+# let marginally-related content through, higher values risk rejecting
+# queries where multiple chunks are legitimately relevant.
+_RELATIVE_GATE_RATIO = 5.0
+# Absolute floor: even with a clear relative gap, the top score must
+# exceed this minimum to prevent all-near-zero degenerate cases from
+# producing a false "answer exists".
+_ABSOLUTE_FLOOR = 1e-5
+
+
+def _relative_gate(sorted_scores: list[float], absolute_floor: float) -> bool:
+    """Relative answerability gate — is there a clear winner?
+
+    Logic: the top score must exceed the median by at least
+    ``_RELATIVE_GATE_RATIO`` (5×), AND exceed the absolute floor. This
+    replaces the previous absolute-only gate (min_rerank_score) which
+    required different thresholds for literal vs paraphrase queries.
+
+    Examples:
+      [0.204, 0.0015, 0.0003, 0.0001] → median=0.0009, ratio=227 → True
+      [0.002, 0.0018, 0.0015, 0.001] → median=0.0015, ratio=1.3 → False
+      [0.0, 0.0, 0.0] → median=0, top=0 → floor check fails → False
+    """
+    if not sorted_scores:
+        return False
+    top = sorted_scores[0]
+    if top < max(absolute_floor, _ABSOLUTE_FLOOR):
+        return False
+    if len(sorted_scores) < 2:
+        return top > absolute_floor  # single candidate: trust it if above floor
+    mid = len(sorted_scores) // 2
+    median = sorted_scores[mid]
+    if median <= 0:
+        return top > absolute_floor  # all-zero median: rely on absolute
+    return top / median >= _RELATIVE_GATE_RATIO
 
 
 async def ingest_untrusted_document(
