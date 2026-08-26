@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.rag_documents import RagDocumentChunk
@@ -86,7 +86,7 @@ class RagDocumentRepository:
         query_text: str,
         query_vector: list[float] | None,
         limit: int,
-        channel_k: int = 20,
+        channel_k: int = 50,
         mode: str = "hybrid",
     ) -> list[HybridSearchRow]:
         """Fuse pgvector and pg_trgm rankings with RRF; user-isolated.
@@ -95,6 +95,10 @@ class RagDocumentRepository:
         ``hybrid`` (default), ``vector`` (semantic only), ``lexical``
         (pg_trgm only).
         """
+        # pgvector's HNSW default ef_search=40 silently truncates recall;
+        # industry practice is 100-200 (pgvector docs, Qdrant benchmarks).
+        # Session-scoped: affects only queries on this connection.
+        await self._session.execute(text("SET LOCAL hnsw.ef_search = 200"))
 
         vector_ranks: dict[UUID, int] = {}
         if query_vector is not None and mode in {"hybrid", "vector"}:

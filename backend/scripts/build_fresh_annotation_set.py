@@ -12,7 +12,6 @@ kappa >= 0.7 on unseen data.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import csv
 import json
@@ -21,10 +20,15 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.agent.nodes import build_planning_context, fallback_candidate
+from app.agent.nodes import fallback_candidate
 from app.core.config import get_settings
 from app.providers.llm import build_planning_provider
-from app.schemas.agent_runs import PlanCandidate, PlanningContext, PlanningWindow, ProfileContext, ProviderPlanResponse
+from app.schemas.agent_runs import (
+    PlanningContext,
+    PlanningWindow,
+    ProfileContext,
+    ProviderPlanResponse,
+)
 
 FRESH_CASES = [
     {"case_id": "fresh-01", "message": "帮我安排下找工作的日程，主要是简历这块还没弄好",
@@ -99,7 +103,8 @@ async def generate() -> int:
             "rubric_version": "plan-quality-rubric-v1-anchored",
             "provider": settings.llm_provider,
             "request_message": case["message"],
-            "profile_summary": f"{case['goal_type']} / {case['stage']} / {case['level']} / {case['budget']}min/day",
+            "profile_summary": f"{case['goal_type']} / {case['stage']} / {case['level']}"
+                f" / {case['budget']}min/day",
             "time_budget_minutes": case["budget"],
             "evidence_catalog_ids": [],
             "candidate": candidate.model_dump(mode="json"),

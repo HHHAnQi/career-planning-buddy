@@ -12,6 +12,7 @@ evidence-visibility validator on the planning graph.
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,9 @@ from app.tools.sanitization import sanitize_untrusted_text
 logger = logging.getLogger(__name__)
 
 MAX_CHUNKS_PER_DOCUMENT = 60
-RECALL_CANDIDATES = 20
+# Industry sweet spot (Cohere: 50-75; Anthropic reference: 150).
+# Wider recall gives the reranker more candidates to rescue.
+RECALL_CANDIDATES = 50
 
 
 class DocumentSearchResult:
@@ -64,11 +67,13 @@ class RagDocumentService:
         embedding_provider: EmbeddingProvider,
         rerank_provider: RerankProvider,
         min_rerank_score: float,
+        rerank_bypass_enabled: bool = False,
     ) -> None:
         self._session = session
         self._embeddings = embedding_provider
         self._rerank = rerank_provider
         self._min_rerank_score = min_rerank_score
+        self._rerank_bypass_enabled = rerank_bypass_enabled
         self._repo = RagDocumentRepository(session)
 
     async def ingest_document(
@@ -138,6 +143,27 @@ class RagDocumentService:
         if not recalled:
             return DocumentSearchOutcome(sufficient=False, results=[])
 
+        # Conditional rerank bypass: SKIPPED by default (always rerank).
+        # The design is in place for large-corpus deployments where rerank
+        # latency matters — enable via RAG_RERANK_BYPASS=true. On small
+        # corpora the gap-based heuristic is unreliable (noise items can
+        # have large relative RRF gaps) and the answerability gate is
+        # safer with the reranker always scoring.
+        if self._rerank_bypass_enabled and _bypass_rerank(recalled):
+            top_rrf = recalled[0].rrf_score or 0.0
+            ranked = list(
+                DocumentSearchResult(
+                    chunk=row.chunk,
+                    rerank_score=1.0 - (row.rrf_score or 0.0),
+                    vector_rank=row.vector_rank,
+                    lexical_rank=row.lexical_rank,
+                )
+                for row in recalled[:limit]
+            )
+            return DocumentSearchOutcome(
+                sufficient=top_rrf > 0.01, results=ranked if top_rrf > 0.01 else []
+            )
+
         scores = await self._rerank.rerank(
             query, [row.chunk.content for row in recalled]
         )
@@ -165,6 +191,35 @@ def sanitized_snippet(content: str, limit: int = 1200) -> str:
     """Untrusted document content is sanitized before entering evidence."""
 
     return sanitize_untrusted_text(content, limit)
+
+
+def _confident_fusion_confidence(recalled: list[Any]) -> float:
+    """Return the RRF score gap ratio between #1 and #2 (0 if no gap).
+
+    A gap > 0.3 means the fusion has a clear winner — the neural reranker
+    is unlikely to improve ordering and may degrade it.
+    """
+    if len(recalled) < 2:
+        return 1.0
+    top = recalled[0].rrf_score or 0.0
+    second = recalled[1].rrf_score or 0.0
+    if top <= 0:
+        return 0.0
+    return (top - second) / top
+
+
+def _bypass_rerank(recalled: list[Any]) -> bool:
+    """Decide whether to skip the neural reranker for this query.
+
+    Bypass requires BOTH a confident gap AND a meaningful absolute score;
+    either alone is insufficient (gap alone lets noise through, absolute
+    alone wastes rerank on ambiguous rankings).
+    """
+    if len(recalled) <= 3:
+        return False  # too few candidates to trust fusion alone
+    gap = _confident_fusion_confidence(recalled)
+    top = recalled[0].rrf_score or 0.0
+    return gap > 0.3 and top > 0.02
 
 
 async def ingest_untrusted_document(
