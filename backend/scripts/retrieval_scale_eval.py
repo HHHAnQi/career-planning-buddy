@@ -127,7 +127,7 @@ async def _provision(
         async with session_transaction(session):
             user = (await AuthService(session, TokenService(get_settings())).login_guest(None)).user
             chunks_all: list[str] = []
-            for i, doc in enumerate(docs):
+            for _i, doc in enumerate(docs):
                 chunks_all.extend(chunk_document(doc))
             vectors = await embedding.embed(chunks_all)
             repo = RagDocumentRepository(session)

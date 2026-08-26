@@ -123,11 +123,29 @@ async def run(k: int, dataset: str = DEFAULT_DATASET) -> dict[str, object]:
 
                 results: dict[str, dict[str, float]] = {}
                 for mode in MODES + ("hybrid_rerank",):
-                    per_case: list[tuple[list[object], set[object]]] = []
                     repository = RagDocumentRepository(session)
+                    positive_cases = []
+                    negative_cases = []
+                    gate_outcomes = []  # (expected_sufficient, actual_sufficient)
+                    mode_latencies = []
                     for case in cases:
                         case_id = str(case["case_id"])
                         chunks = provisioned[case_id]
+                        is_negative = case.get("negative", False) or not case.get("relevant")
+
+                        if is_negative:
+                            # Negative case: no golden, expect gate to reject
+                            if mode == "hybrid_rerank":
+                                outcome = await service.search(
+                                    user_id=corpus_users[case_id].id,  # type: ignore[attr-defined]
+                                    query=str(case["query"]),
+                                    limit=k,
+                                )
+                                gate_outcomes.append((False, outcome.sufficient))
+                            else:
+                                gate_outcomes.append((False, False))  # non-rerank modes have no gate
+                            continue
+
                         relevant = {
                             chunk.id
                             for chunk in chunks
@@ -140,6 +158,8 @@ async def run(k: int, dataset: str = DEFAULT_DATASET) -> dict[str, object]:
                             raise ValueError(
                                 f"{case_id}: no golden marker matched any chunk"
                             )
+                        import time as _time
+                        _t0 = _time.monotonic()
                         if mode == "hybrid_rerank":
                             outcome = await service.search(
                                 user_id=corpus_users[case_id].id,  # type: ignore[attr-defined]
@@ -147,6 +167,7 @@ async def run(k: int, dataset: str = DEFAULT_DATASET) -> dict[str, object]:
                                 limit=k,
                             )
                             ranked = [result.chunk.id for result in outcome.results]
+                            gate_outcomes.append((True, outcome.sufficient))
                         else:
                             rows = await repository.hybrid_search(
                                 user_id=corpus_users[case_id].id,
@@ -156,8 +177,47 @@ async def run(k: int, dataset: str = DEFAULT_DATASET) -> dict[str, object]:
                                 mode=mode,
                             )
                             ranked = [row.chunk.id for row in rows]
-                        per_case.append((ranked, relevant))
-                    results[mode] = summarize(per_case, k=k)
+                            gate_outcomes.append((True, True))
+                        mode_latencies.append((_time.monotonic() - _t0) * 1000)
+                        positive_cases.append((ranked, relevant))
+
+                    mode_result = summarize(positive_cases, k=k)
+                    # MRR@1: fraction where golden is at rank 1
+                    mode_result["mrr_at_1"] = sum(
+                        1.0 for ranked, relevant in positive_cases
+                        if ranked and ranked[0] in relevant
+                    ) / len(positive_cases) if positive_cases else 0.0
+                    # Gate accuracy: fraction of correct sufficiency decisions
+                    if gate_outcomes:
+                        mode_result["gate_accuracy"] = sum(
+                            1.0 for expected, actual in gate_outcomes if expected == actual
+                        ) / len(gate_outcomes)
+                        mode_result["gate_true_negative_rate"] = (
+                            sum(1.0 for e, a in gate_outcomes if e is False and a is False)
+                            / max(1, sum(1 for e, _ in gate_outcomes if e is False))
+                        )
+                    # Latency
+                    if mode_latencies:
+                        mode_latencies.sort()
+                        mode_result["latency_p50_ms"] = round(
+                            mode_latencies[len(mode_latencies) // 2]
+                        )
+                        mode_result["latency_p95_ms"] = round(
+                            mode_latencies[int(len(mode_latencies) * 0.95)]
+                        )
+                    # Wilson CI on recall
+                    n = len(positive_cases)
+                    if n > 0:
+                        p = mode_result[f"recall_at_{k}"]
+                        z = 1.96
+                        denom = 1 + z * z / n
+                        centre = (p + z * z / (2 * n)) / denom
+                        margin = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / denom
+                        mode_result[f"recall_at_{k}_ci95"] = [
+                            round(max(0, centre - margin), 3),
+                            round(min(1, centre + margin), 3),
+                        ]
+                    results[mode] = mode_result
 
                 return {
                     "dataset": dataset,
