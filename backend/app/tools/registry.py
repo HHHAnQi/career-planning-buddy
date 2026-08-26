@@ -531,7 +531,13 @@ def build_tool_registry(
         RegisteredTool(
             spec=ModelToolSpec(
                 name="memory_lookup",
-                description="Retrieve the current user's active long-term memories.",
+                description=(
+                    "Retrieve the current user's confirmed long-term memories "
+                    "(execution lessons, review findings, personal preferences). "
+                    "Call this FIRST whenever the request refers to the user's "
+                    "past experience, habits, or lessons learned — those facts "
+                    "are ONLY visible through this tool."
+                ),
                 input_json_schema=MemoryLookupInput.model_json_schema(),
                 contract_version="1.0",
             ),
