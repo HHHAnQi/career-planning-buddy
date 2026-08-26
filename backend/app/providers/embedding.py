@@ -134,6 +134,24 @@ class LocalEmbeddingProvider:
 def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
     if settings.embedding_provider == "mock":
         return MockEmbeddingProvider(settings.embedding_dim)
+    if settings.embedding_provider == "openai_compatible":
+        if (
+            settings.embedding_api_key is None
+            or settings.embedding_base_url is None
+            or settings.embedding_api_model is None
+        ):
+            raise ProviderConfigurationError(
+                "openai_compatible embedding requires EMBEDDING_API_KEY, "
+                "EMBEDDING_BASE_URL, and EMBEDDING_API_MODEL"
+            )
+        from app.providers.embedding_api import OpenAICompatibleEmbeddingProvider
+
+        return OpenAICompatibleEmbeddingProvider(
+            api_key=settings.embedding_api_key.get_secret_value(),
+            base_url=str(settings.embedding_base_url),
+            model=settings.embedding_api_model,
+            dimension=settings.embedding_dim,
+        )
     if settings.embedding_model_path is None:
         raise ProviderConfigurationError("local embedding requires EMBEDDING_MODEL_PATH")
     return LocalEmbeddingProvider(

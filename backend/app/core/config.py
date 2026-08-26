@@ -94,8 +94,11 @@ class Settings(BaseSettings):
     # dropped; the search returns "insufficient evidence" instead of
     # forcing a weak match.
     rag_min_rerank_score: float = Field(default=0.05, ge=0, le=1)
-    embedding_provider: Literal["mock", "local"] = "mock"
+    embedding_provider: Literal["mock", "local", "openai_compatible"] = "mock"
     embedding_model_path: Path | None = None
+    embedding_api_key: SecretStr | None = Field(default=None, min_length=1)
+    embedding_base_url: AnyHttpUrl | None = None
+    embedding_api_model: str | None = Field(default=None, min_length=1, max_length=128)
 
     # PR-5: per-process eval provider mode. TrialRunner honours "fixture" /
     # "mock" / "live" when building the executor's providers (LLM + Search +
