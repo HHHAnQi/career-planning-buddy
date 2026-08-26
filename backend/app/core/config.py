@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     # Answerability gate: chunks scoring below this rerank score are
     # dropped; the search returns "insufficient evidence" instead of
     # forcing a weak match.
-    rag_min_rerank_score: float = Field(default=0.05, ge=0, le=1)
+    rag_min_rerank_score: float = Field(default=0.001, ge=0, le=1)
     embedding_provider: Literal["mock", "local", "openai_compatible"] = "mock"
     embedding_model_path: Path | None = None
     embedding_api_key: SecretStr | None = Field(default=None, min_length=1)

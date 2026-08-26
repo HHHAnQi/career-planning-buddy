@@ -31,8 +31,14 @@ logger = logging.getLogger(__name__)
 
 MAX_CHUNKS_PER_DOCUMENT = 60
 # Industry sweet spot (Cohere: 50-75; Anthropic reference: 150).
-# Wider recall gives the reranker more candidates to rescue.
+# Wide recall gives hybrid fusion more signal to work with.
 RECALL_CANDIDATES = 50
+# "Retrieve wide, rerank narrow": only the top fusion results go to the
+# neural reranker. Sending all 50 candidates degrades cross-encoder
+# ordering (measured: Recall@5 drops 0.95→0.67 on v2 when reranking 50
+# vs 20) because distractors dilute the score distribution and push
+# golden chunks below the answerability gate.
+RERANK_INPUT_SIZE = 20
 # Rerank cache: absorbs 60-80% of repeated traffic (industry benchmark).
 # Bounded LRU keyed on (query, chunk_ids) hash.
 _RERANK_CACHE_SIZE = 256
@@ -177,19 +183,31 @@ class RagDocumentService:
                 sufficient=top_rrf > 0.01, results=ranked if top_rrf > 0.01 else []
             )
 
+        # "Retrieve wide, rerank narrow": hybrid fusion ranks the full
+        # recall set (50), but only the top fusion results are sent to
+        # the cross-encoder. Reranking the full 50 degrades ordering
+        # because distractors dilute the score distribution.
+        rerank_input = recalled[:RERANK_INPUT_SIZE]
+
         # Rerank result cache: keyed on (normalized query, chunk ids) hash.
         # Same query + same candidate set → identical ordering, skip the
         # neural reranker call entirely (industry: absorbs 60-80% of
         # repeated traffic at zero quality cost).
         cache_key = sha256(
-            (normalized + "|" + ",".join(str(r.chunk.id) for r in recalled)).encode()
+            (normalized + "|" + ",".join(str(r.chunk.id) for r in rerank_input)).encode()
         ).hexdigest()
         cached = _rerank_cache_get(cache_key)
         if cached is not None:
             scores = cached
         else:
+            # The reranker receives the ORIGINAL query, not the expanded
+            # one: cross-encoders handle synonyms natively, and appending
+            # canonical terms dilutes the cross-attention signal (measured:
+            # hybrid_rerank MRR 1.0 → 0.63 when reranking the expanded
+            # query on v2). Expansion helps only the bi-encoder/trigram
+            # channels, which see it above.
             scores = await self._rerank.rerank(
-                normalized, [row.chunk.content for row in recalled]
+                query, [row.chunk.content for row in rerank_input]
             )
             _rerank_cache_put(cache_key, scores)
         ranked = sorted(
@@ -201,7 +219,7 @@ class RagDocumentService:
                     lexical_rank=row.lexical_rank,
                 )
                 for index, (row, score) in enumerate(
-                    zip(recalled, scores, strict=False)
+                    zip(rerank_input, scores, strict=False)
                 )
                 if float(score) >= self._min_rerank_score
             ),
