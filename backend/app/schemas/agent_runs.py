@@ -445,6 +445,13 @@ class PlanningState(TypedDict, total=False):
     repair_count: int
     fallback_reason: str | None
     companion: CompanionMessageCandidate
+    # Provenance of the finalized candidate for model-vs-engineering
+    # attribution: "model_pass" | "format_repair" | "deterministic_repair"
+    # | "llm_repair" | "fallback".
+    plan_provenance: str
+    # Rule codes that deterministic repair cannot handle; persisted for the
+    # offline rule-iteration loop (unknown-rule backlog).
+    unknown_rule_codes: list[str]
 
 
 class AgentEventPayload(StrictModel):

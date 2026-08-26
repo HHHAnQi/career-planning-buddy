@@ -208,6 +208,11 @@ class OpenAICompatiblePlanningProvider:
                 "usage": usage.model_dump(mode="json"),
             }
         if response.tool_calls:
+            # Live models occasionally emit more tool calls than the
+            # per-turn schema allows (AgentTurnResponse.tool_calls is
+            # capped at 2); keep the leading calls rather than failing
+            # the whole Run — the graph re-truncates to the Run budget.
+            capped_calls = response.tool_calls[:2]
             return AgentTurnResponse(
                 tool_calls=[
                     ProviderToolCall(
@@ -215,7 +220,7 @@ class OpenAICompatiblePlanningProvider:
                         name=call.name,
                         arguments=call.arguments,
                     )
-                    for call in response.tool_calls
+                    for call in capped_calls
                 ],
                 usage=usage,
             ).model_dump(mode="json")

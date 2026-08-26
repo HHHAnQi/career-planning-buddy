@@ -31,9 +31,11 @@ from app.agent.nodes import (
 )
 from app.agent.ports import PlanningResultPort
 from app.core.database import session_transaction
+from app.core.metrics import AGENT_REPAIR_PATH, AGENT_UNKNOWN_RULE, make_labels
 from app.core.time import product_today
 from app.harness.budget import BudgetGuard
 from app.harness.checkpoints import CheckpointStore
+from app.harness.events import EventRecorder
 from app.harness.evidence import build_evidence_visibility
 from app.harness.snapshots import SnapshotService
 from app.harness.stream_progress import StreamProgressPublisher
@@ -380,6 +382,8 @@ class FixedPlanningGraph:
         }
         if state.get("fallback_reason") is not None:
             result["fallback_reason"] = state["fallback_reason"]
+        if state.get("plan_provenance") is not None:
+            result["plan_provenance"] = state["plan_provenance"]
         return result
 
     async def _validator_node(self, state: PlanningState) -> dict[str, object]:
@@ -412,6 +416,8 @@ class FixedPlanningGraph:
             "candidate_evidence_visibility": visibility,
             "fallback_reason": fallback_reason,
             "repair_count": state.get("repair_count", 0) + 1,
+            "plan_provenance": state.get("plan_provenance"),
+            "unknown_rule_codes": state.get("unknown_rule_codes", []),
         }
 
     async def _companion_node(self, state: PlanningState) -> dict[str, object]:
@@ -427,6 +433,23 @@ class FixedPlanningGraph:
 
     async def _persist_node(self, state: PlanningState) -> dict[str, object]:
         run_id = state["run_id"]
+        provenance = self._derive_provenance(state)
+        AGENT_REPAIR_PATH.inc(make_labels(path=provenance))
+        # Durable attribution event: the eval attribution report joins this
+        # against trial outcomes to split model vs engineering contribution.
+        async with self._session_factory() as session:
+            async with session_transaction(session):
+                await EventRecorder(session).record(
+                    run_id,
+                    "run.provenance",
+                    {
+                        "plan_provenance": provenance,
+                        "repair_count": state.get("repair_count", 0),
+                        "validation_attempt": state.get("validation_attempt", 0),
+                        "fallback_reason": state.get("fallback_reason"),
+                        "unknown_rule_codes": state.get("unknown_rule_codes", []),
+                    },
+                )
         persist_step = await self._nodes.start_step(run_id, "persist")
         await self._finalizer.finalize_plan(
             run_id=run_id,
@@ -634,8 +657,22 @@ class FixedPlanningGraph:
             context,
             recent_tasks_budget=config.context_recent_tasks_budget,
             recent_reviews_budget=config.context_recent_reviews_budget,
+            focus_query=state["request"].message,
+            max_context_tokens=config.max_input_tokens_per_call,
         )
         context = compression.context
+        if compression.promoted_task_count or compression.budget_shrink_steps:
+            logger.info(
+                "agent.context.compression",
+                extra={
+                    "run_id": str(state["run_id"]),
+                    "promoted_task_count": compression.promoted_task_count,
+                    "budget_shrink_steps": compression.budget_shrink_steps,
+                    "task_compressed_count": compression.task_compressed_count,
+                    "before_chars": compression.before_chars,
+                    "after_chars": compression.after_chars,
+                },
+            )
         evidence_catalog = [
             EvidenceCatalogItem(
                 kind="memory",
@@ -991,6 +1028,9 @@ class FixedPlanningGraph:
                         ),
                         _step_telemetry(repair_visibility),
                     )
+                # Format repair succeeded: the finalized candidate came from
+                # the provider repair call, not the model's first-shot output.
+                state["plan_provenance"] = "format_repair"
                 return NodeOutput(
                     (
                         response.candidate,
@@ -1091,7 +1131,29 @@ class FixedPlanningGraph:
         # burning an LLM call on a repair the model can't do (live eval:
         # GLM-4.7 business-repair success is 0/6). If code can fix it,
         # the repaired candidate goes straight to re-validation.
-        from app.agent.deterministic_repair import deterministic_repair
+        from app.agent.deterministic_repair import (
+            DETERMINISTICALLY_REPAIRABLE,
+            deterministic_repair,
+        )
+
+        unknown_codes = [
+            code for code in failed_codes if code not in DETERMINISTICALLY_REPAIRABLE
+        ]
+        if unknown_codes:
+            # Unknown-rule backlog: codes the deterministic layer cannot
+            # patch are logged and counted so the offline rule-iteration
+            # loop can promote recurring patterns into code repairs.
+            state["unknown_rule_codes"] = unknown_codes
+            logger.warning(
+                "agent.repair.unknown_rule",
+                extra={
+                    "run_id": str(state["run_id"]),
+                    "unknown_rule_codes": unknown_codes,
+                    "failed_checks": failed_codes,
+                },
+            )
+            for code in unknown_codes:
+                AGENT_UNKNOWN_RULE.inc(make_labels(code=code))
 
         deterministically_fixed = deterministic_repair(
             state["candidate_plan"], context, failed_codes
@@ -1103,6 +1165,8 @@ class FixedPlanningGraph:
                     call_id=f"{state['run_id']}:deterministic_repair",
                     evidence_catalog=list(state.get("evidence_catalog", [])),
                 )
+                AGENT_REPAIR_PATH.inc(make_labels(path="deterministic"))
+                state["plan_provenance"] = "deterministic_repair"
                 return NodeOutput(
                     (deterministically_fixed, None, visibility),
                 )
@@ -1128,6 +1192,9 @@ class FixedPlanningGraph:
                 f"{state['run_id']}:business_repair:{state.get('repair_count', 0) + 1}"
             ),
             evidence_catalog=list(state.get("evidence_catalog", [])),
+        )
+        AGENT_REPAIR_PATH.inc(
+            make_labels(path="llm_unknown" if unknown_codes else "llm")
         )
         raw = await self._provider.repair_business_rules(
             candidate=state["candidate_plan"],
@@ -1155,6 +1222,7 @@ class FixedPlanningGraph:
                     visibility,
                 ),
             )
+        state["plan_provenance"] = "llm_repair"
         return NodeOutput(
             (response.candidate, None, visibility),
             self._telemetry(
@@ -1175,6 +1243,12 @@ class FixedPlanningGraph:
                 for key, value in values.items():
                     setattr(run, key, value)
                 await session.flush()
+
+    @staticmethod
+    def _derive_provenance(state: PlanningState) -> str:
+        if state.get("fallback_reason") is not None:
+            return "fallback"
+        return state.get("plan_provenance") or "model_pass"
 
     @staticmethod
     async def _validate_with_trace(

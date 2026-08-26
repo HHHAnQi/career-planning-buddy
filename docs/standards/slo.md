@@ -29,9 +29,17 @@ cd backend
 python -m scripts.slo_report                      # 全量（DB 指标 + 检索）
 python -m scripts.slo_report --db-only            # 仅 DB 可得指标
 # 检索指标需先跑: python -m scripts.run_retrieval_eval --dataset retrieval-v2
+# 双维度归因（模型 vs 工程贡献拆分）: python scripts/attribution_report.py
 ```
 
 任一 SLO 未达 → 退出码 1（可接 CI / 部署前检查）。
+
+### live 实验 runbook（重要）
+
+**跑 in-process live 实验前必须 `docker stop career-planning-buddy-backend-1`。**
+dev 容器的 intake worker 会在共享库里抢新建的 pending Run（lease 先到先得），
+导致 trial 以 `RUN_NOT_COMPLETED` 失败（2026-08-26 实测：14/30 trial 被抢）。
+实验结束后 `docker start` 恢复。pytest 已用独立库 `career_buddy_test` 隔离，不受影响。
 
 ## 修订历史
 
@@ -41,3 +49,10 @@ python -m scripts.slo_report --db-only            # 仅 DB 可得指标
 
 - v1.2（2026-08-26）最终结果：hard gate 92.2%（+20pp from 72.2% baseline）✅ 达标。
   27/30 case 3/3 全过；仅剩 repair-02/04 全败（mock-scripted，live 无效 case）。
+
+- v1.3（2026-08-26）新增双维度归因体系：图 persist 节点写 `run.provenance`
+  事件（model_pass / format_repair / deterministic_repair / llm_repair / fallback
+  五互斥标签），`scripts/attribution_report.py` 对最新 live 实验输出模型能力
+  占比 vs 工程兜底占比 + 未知规则 backlog。同时新增未知违规观测
+  （`agent_unknown_rule_total` 计数器）与三级上下文压缩（相关性召回→动态
+  预算→摘要折叠）。

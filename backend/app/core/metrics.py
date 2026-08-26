@@ -127,6 +127,8 @@ HTTP_REQUESTS = registry.counter("http_requests_total")
 HTTP_REQUEST_DURATION = registry.summary("http_request_duration_seconds")
 HTTP_IN_FLIGHT = registry.gauge("http_requests_in_flight")
 RATE_LIMIT_REJECTIONS = registry.counter("http_rate_limit_rejections_total")
+AGENT_REPAIR_PATH = registry.counter("agent_repair_path_total")
+AGENT_UNKNOWN_RULE = registry.counter("agent_unknown_rule_total")
 
 
 def render_metrics() -> str:
