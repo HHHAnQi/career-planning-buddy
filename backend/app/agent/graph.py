@@ -855,27 +855,50 @@ class FixedPlanningGraph:
                 intent=state["intent"].intent,
                 requires_fresh_information=state["intent"].requires_fresh_information,
             )
-            # Deterministic memory-trigger: when the intent router detected
-            # past-context references, force memory_lookup into the tool
-            # list on the FIRST turn (before the model decides anything).
-            # This bypasses the model's low voluntary tool-invocation rate
-            # (~11% on GLM-4.7) for the memory pathway.
+            # Deterministic memory pre-execution: when the router detects
+            # past-context references, EXECUTE memory_lookup directly (not
+            # just make it available — the model won't call it voluntarily,
+            # measured ~11% on GLM-4.7). Results go into the evidence
+            # catalog before the LLM call, so the tool_calls table records
+            # the execution and the grader sees it.
             if (
                 turn_index == 0
                 and not force_final
                 and state["intent"].references_past_context
                 and state["intent"].intent in {RunIntent.CREATE_PLAN, RunIntent.REPLAN}
-                and not any(spec.name == "memory_lookup" for spec in available_tools)
+                and not any(
+                    item.kind == "memory"
+                    for item in evidence_catalog
+                )
             ):
-                all_specs = self._tool_registry.available_specs(
-                    intent=state["intent"].intent,
-                    requires_fresh_information=True,  # force all tools visible
+                pre_execution = await self._tool_registry.execute(
+                    tool_name="memory_lookup",
+                    arguments={"query": state["request"].message[:200], "limit": 5},
+                    context=ToolContext(
+                        run_id=state["run_id"],
+                        user_id=state["user_id"],
+                        goal_type=context.profile.goal_type,
+                        intent=state["intent"].intent,
+                        requires_fresh_information=(
+                            state["intent"].requires_fresh_information
+                        ),
+                        remaining_deadline_ms=int(self._budget.remaining_seconds() * 1000),
+                    ),
+                    step_id=step_id,
+                    round_number=1,
                 )
-                memory_spec = next(
-                    (spec for spec in all_specs if spec.name == "memory_lookup"), None
-                )
-                if memory_spec is not None:
-                    available_tools.append(memory_spec)
+                tool_call_count += 1
+                if pre_execution.success:
+                    for item in pre_execution.result.evidence:
+                        catalog_item = EvidenceCatalogItem.model_validate(
+                            item.model_dump(mode="json")
+                        )
+                        if all(
+                            existing.kind != catalog_item.kind
+                            or existing.id != catalog_item.id
+                            for existing in evidence_catalog
+                        ):
+                            evidence_catalog.append(catalog_item)
             if force_final:
                 available_tools = []
             visible_catalog, visibility = build_evidence_visibility(
