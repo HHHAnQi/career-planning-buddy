@@ -57,16 +57,24 @@ START → risk_gate ──(high)──→ safe_response → END
             ↓
        intent_router ──(navigation)──→ navigation → END
             │(clarification)──→ clarification → END
-            │(ready)
-            ↓
-       context_builder → career_planning_agent → rule_validator
-                                                      │(passed)
-                              ┌──(repair)────────────┤
-                              ↓                      ↓
-                       revise_or_fallback → companion_response → persist → END
+            │(ready: fan-out，同一超步并发)
+            ├──────────────┬──────────────┐
+            ↓              ↓              │
+      memory_loader ∥ evidence_loader    │
+            └──────┬───────┘              │
+                   ↓ (join)               │
+          context_builder → career_planning_agent → rule_validator
+                                                        │(passed)
+                                ┌──(repair)────────────┤
+                                ↓                      ↓
+                         revise_or_fallback → companion_response → persist → END
 ```
 
-- **3 处条件边**：risk_gate 二分支、intent_router 三分支、rule_validator 校验闸门二分支；
+- **原生 fan-out/join 并行**：intent_router 的路由函数返回 `["memory_loader",
+  "evidence_loader"]` 节点列表——LangGraph 在同一超步并发执行两个加载器，
+  context_builder 作为 join 节点汇聚两份 parcel（`tests/test_parallel_context_fanout.py`
+  断言拓扑边与执行区间重叠 >30ms，可复现验证真并发）；
+- **3 处条件边**：risk_gate 二分支、intent_router 三分支（含 fan-out）、rule_validator 校验闸门二分支；
 - **1 条修复回边**：revise_or_fallback → rule_validator，形成有界循环（BudgetGuard 限 1 次 LLM 修复 + 无限确定性修复）；
 - **节点级 Checkpoint**：每个节点执行后落 `agent_checkpoints` 表（run_id + attempt + node_name 唯一），重启后带指纹校验恢复，避免重复烧 LLM 调用；
 - **图内并行**：同一工具轮次的多工具调用 `asyncio.gather` 并行执行，保留提交顺序。
@@ -80,6 +88,12 @@ START → risk_gate ──(high)──→ safe_response → END
 | 中断恢复 | 无 | Checkpointer 语义 + attempt fencing，节点粒度重放 |
 | 循环控制 | 手写 counter 防死循环 | 条件边 + BudgetGuard 双重有界 |
 | 可扩展 | 加节点=改函数签名，连锁修改 | 加节点=注册新 node + 一条边（如后续加 review_agent） |
+
+**并行的工程边界（诚实取舍）**：两个加载器通过 `NodeRunner.run_exclusive`
+在共享锁内完成"步骤记账 + DB 读取"的单锁段——单连接运行时（测试）借此
+串行化事务避免 savepoint 互踩；连接池部署下锁只竞争 DB 读取时长，而
+记忆分支的 **embedding 网络调用在锁外执行**，与证据分支的 DB 读取真实
+重叠（这正是并行的收益来源，测试断言的就是这一段）。
 
 **什么时候不该用 LangGraph**：纯线性 ETL、单次 LLM 调用的封装层——图运行时是多余依赖。本系统有分支、有环、有恢复需求，三条全占，选 LangGraph 的边际成本小于自研等价物（自研估算：状态通道 + 条件路由 + checkpoint 至少 800–1200 行，且没有社区验证）。
 
@@ -115,7 +129,20 @@ Live 评测发现 GLM-4.7 自主工具触发率仅 11%（9 个需要记忆的 ca
 | L2 Personal | `memories` 表（per-user） | 跨会话永久 | 语义向量 + 半衰期（14 天）+ 可信度过滤，上限 5 条/1200 字 | 已上线：replan 连续性、个性化约束 | **用户 ≥1,000**：千人千面。当前 30 case 评测已证明 replan-continivity 依赖此层 |
 | L3 Shared | 待建（经验原子表已有雏形） | 全局 | 频次+成功率聚合 | 当前单租户无收益，**刻意未启用** | **用户 ≥5,000**：高频规划模式沉淀为全局模板，跳过部分推理，预估省 15–25% 输出 token |
 
-答辩要点：L3 不是"没做完"，是**明确的不做决策**——单租户阶段写共享层会引入跨用户污染风险（记忆串台是最难排查的生产事故），收益为零。阈值写进了迭代计划（§10），这是按需演进，不是过度设计的补丁说辞。L1/L2 在当前规模已经各有不可替代的作用，有评测 case 背书。
+**实测消融数据**（2026-08-26，`7646a9e8` off / `85d6ba48` on，30 case × k=1，
+GLM-4.7，同一份代码仅切 `MEMORY_DISABLED`）：
+
+| 指标 | memory ON | memory OFF | 差值 |
+|---|---|---|---|
+| 硬门禁通过 | **28/30（93.3%）** | 24/30（80.0%） | **+13.3pp** |
+| live-mem 记忆接地 case | 3/3 | 0/3（败因全部为 tool.expected_match） | +3 case |
+| 输入 token 均值 | 1988 | 2188 | ON 反而省 9.1%（接地避免修复轮） |
+| 记忆召回延迟（memory_loader 节点） | 均值 5ms / 峰值 13ms | —（无此节点） | 并行分支，不在关键路径 |
+
+结论：L2 Personal 层的量化价值不再是估算——**关掉它直接丢 13.3 个百分点**，
+且记忆注入的 token 成本被修复环的节省完全覆盖。L3 仍未建（阈值见 §10）。
+
+答辩要点：L3 不是"没做完"，是**明确的不做决策**——单租户阶段写共享层会引入跨用户污染风险（记忆串台是最难排查的生产事故），收益为零。阈值写进了迭代计划（§10），这是按需演进，不是过度设计的补丁说辞。L1/L2 在当前规模已经各有不可替代的作用，有消融实验背书。
 
 ---
 
@@ -147,8 +174,11 @@ Live 评测发现 GLM-4.7 自主工具触发率仅 11%（9 个需要记忆的 ca
 
 未知违规码（不在 `DETERMINISTICALLY_REPAIRABLE` 白名单内的）现在会：
 
-1. **运行时**：结构化日志 `agent.repair.unknown_rule` + Prometheus 计数器 `agent_unknown_rule_total{code=...}` + `run.provenance` 事件携带 `unknown_rule_codes` 数组；
-2. **离线**：`attribution_report.py` 汇总未知规则 backlog（哪个码、出现几次、是否最终降级），达到阈值（同一码 ≥N 次）即人工分析并提升为确定性修复规则——**规则库随 badcase 持续生长**；
+1. **运行时**：结构化日志 `agent.repair.unknown_rule` + Prometheus 计数器 `agent_unknown_rule_total{code=...}` + `run.provenance` 事件携带 `unknown_rule_codes` 数组与 LLM 归类标签 `violation_category`（business_repair prompt 要求模型输出违规类型分类，经 ProviderPlanResponse 透传进归因事件）；
+   **故障注入测试**（`tests/test_unknown_rule_fault_injection.py`）：注入白名单外的
+   `INJECTED_UNKNOWN_RULE` 规则码，端到端断言计数 +1、状态写入、LLM 修复被
+   调用、失败后降级模板保底——闭环可复现，不是纸面机制；
+2. **离线**：`attribution_report.py` 汇总未知规则 backlog（哪个码、出现几次、LLM 归类分布），**同一码 ≥3 次自动输出"建议提升为确定性规则"**——规则库随 badcase 持续生长的迭代闭环有明确触发阈值；
 3. **兜底**：无论 LLM 修复成败，降级路径保证用户永远拿到 schema 合法的可用计划，未知规则永远不可能产生非法输出上线。
 
 这构成「已知规则确定性修复（快、稳、0 token）→ 未知规则模型智能适配（慢、覆盖长尾）→ 长期场景离线沉淀为代码（规则库迭代）」的完整闭环。
@@ -200,6 +230,27 @@ Live 评测发现 GLM-4.7 自主工具触发率仅 11%（9 个需要记忆的 ca
 |---|---|---|---|
 | **工程稳定性**（保可用） | 硬门禁通过率、降级率、P95 延迟、单 run 成本、恢复成功率 | 确定性修复、预执行、降级模板、thinking 禁用 | 72.2%→92.2%；P50 26s→22s，P95 45.5s≤60s；成本 ≤¥0.01/run |
 | **模型智能能力**(保好用) | 模型一次通过率（model_pass 占比）、模型自修复成功率、工具决策准确率、检索质量 | prompt 迭代、上下文精简、rubric 校准、数据沉淀 | 由归因报告逐 trial 量化（§8.2） |
+
+**DirectLLM 基线对照实验**（`8d3f4781`，2026-08-26，30 case × k=1，GLM-4.7）：
+裸模型直出（无工具/无记忆/无证据可见性）硬门禁 **93.3%** vs 完整 Agent 臂
+**83.3%**。这组对照的诚实解读是双面的：
+
+1. **裸模型结构化输出能力已经很强**——这是敢做复杂 Agent 架构的前提，
+   不是架构的失败。硬门禁度量的是 schema/规则合规，恰好是裸模型的强项；
+2. **Agent 臂的增量价值在硬门禁之外**：记忆接地（replan 连续性、证据引用）、
+   工具调用、预算硬限、断点恢复、产出可归因——这些是裸模型臂根本不具备
+   的能力维度；
+3. **对照暴露了真实短板并转化为迭代目标**：repair-03 / replan-05 两个 case
+   裸模型直出通过而 Agent 臂因修复环降级模板失败——修复环降级路径的输出
+   质量低于模型直出，是明确的下一优化项（SLO v1.4 已记录）。
+4. **后续验证**：图拓扑重构 + 工具调用截断修复后的记忆消融 ON 臂
+   （`85d6ba48`，同 30 case）硬门禁回到 **28/30 = 93.3%**——与裸模型基线
+   持平，同时保有记忆接地/工具/预算/恢复能力。即"修复环拖累"消除后，
+   Agent 臂在硬门禁追平基线、在接地维度超出基线。
+
+这组数据的价值恰恰在于它是**反向发现**：如果只报"Agent 比裸模型好"的
+数字才值得怀疑。基线对照让"模型能力 vs 工程价值"的边界第一次有了实测
+锚点。
 
 ### 8.2 双维度归因（本次新增，代码级落地）
 
@@ -274,7 +325,9 @@ Live 评测发现 GLM-4.7 自主工具触发率仅 11%（9 个需要记忆的 ca
 | 工具触发率（引用历史场景） | ~100%（预执行） | — | 11%→~100% |
 | GLM 业务自修复成功率 | 0/6（已由确定性修复接管） | — | 闭环 |
 | 双标注 kappa（D1 质量） | 0.679 | ≥0.6 | ✅ |
-| 双维度归因（2026-08-26 实测，k=1） | 通过路径：模型 83.3% / 工程 16.7%；全局硬门禁 83.3%（k=1 单发） | — | ✅ 新增 |
+| 双维度归因（2026-08-26 实测，k=1） | 通过路径：模型 83.3% / 工程 16.7% | — | ✅ 新增 |
+| 记忆消融（k=1，同代码切换） | ON 93.3% vs OFF 80.0%（+13.3pp）；ON 输入 token 反省 9.1% | — | ✅ 实测 |
+| DirectLLM 基线（k=1） | 裸模型 93.3% vs Agent 83.3%→重构后 93.3% | — | ✅ 反向发现入档 |
 
 ---
 

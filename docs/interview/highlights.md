@@ -55,7 +55,8 @@ L3 Shared 记忆、多 Agent、分布式状态、Redis 限流——全部有量�
 - 落地双维度归因评测体系：逐 run 记录产出路径标签，模型能力贡献与工程兜底贡献同源拆分，30 case × 3 trial 真实模型实验全程可复算（实测：通过路径模型一次通过 83.3%、确定性修复救援 16.7%）；
 - 实现混合检索管线（pgvector + pg_trgm + RRF + GPU rerank + 相对可答性门控），Recall@5 = 1.0、MRR = 0.933（20 case 硬化集含负例与改写查询）；
 - 设计三级上下文压缩（相关性召回/动态 token 预算/摘要折叠），确定性 0 token 完成上下文工程；
-- 建立双人标注 rubric 校准流程（Cohen's kappa 0.679），并以未知规则 backlog 机制驱动规则库随 badcase 迭代。
+- 建立双人标注 rubric 校准流程（Cohen's kappa 0.679），并以未知规则 backlog 机制驱动规则库随 badcase 迭代；
+- 落地 LangGraph 原生 fan-out/join 并行拓扑（memory_loader ∥ evidence_loader，含并发执行断言测试）与 counterfactual 消融体系：记忆层开/关对照实测 +13.3pp 硬门禁、DirectLLM 裸模型基线对照 93.3%（反向发现入档）。
 
 ---
 

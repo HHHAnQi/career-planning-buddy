@@ -132,6 +132,9 @@ async def select_memories(
     # memory_lookup Tool path does NOT use this filter, so planted
     # "deferred" memories stay reachable through explicit lookups.
     exclude_categories: set[str] | None = None,
+    # Pre-embedded query vector (parallel fan-out path embeds outside the
+    # DB transaction so the network call overlaps the evidence branch).
+    precomputed_vector: list[float] | None = None,
 ) -> MemorySelectionResult:
     selected_at = now or datetime.now(UTC)
     query = build_memory_query(
@@ -175,12 +178,13 @@ async def select_memories(
     fallback_used = False
     retrieval_failed = False
     if semantic_enabled and query:
-        vector: list[float] | None = None
-        try:
-            vectors = await embedding_provider.embed([query])
-            vector = vectors[0] if vectors else None
-        except Exception:
-            fallback_used = True
+        vector: list[float] | None = precomputed_vector
+        if vector is None:
+            try:
+                vectors = await embedding_provider.embed([query])
+                vector = vectors[0] if vectors else None
+            except Exception:
+                fallback_used = True
         try:
             semantic_rows = await repository.memory_lookup(
                 user_id=user_id,

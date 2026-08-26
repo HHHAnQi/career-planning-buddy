@@ -160,6 +160,15 @@ def business_repair_messages(
         "operation": "repair_business_rules_once",
         "violations": repair_instructions,
         "candidate": candidate.model_dump(mode="json"),
+        # LLM violation-type classification: the model labels the dominant
+        # violation it fixed so unknown rule codes get a semantic category
+        # in the provenance event (input for offline rule iteration).
+        "violation_classification": (
+            "after repairing, add a top-level field \"violation_category\": "
+            "one short snake_case label classifying the dominant violation "
+            "type you fixed (e.g. replan_continuity, week_alignment, "
+            "time_budget, task_uniqueness, schema_shape, other)"
+        ),
         "output_schema": plan_json_schema(),
     }
     return _messages(

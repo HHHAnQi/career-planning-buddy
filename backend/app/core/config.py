@@ -138,6 +138,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("embedding_dim", "EMBEDDING_DIM", "EMBEDDING_DIMENSION"),
     )
     memory_semantic_retrieval_enabled: bool = True
+    # Counterfactual ablation switch: empty the L2 Personal memory layer
+    # (planning catalog AND the memory_lookup tool) for controlled
+    # experiments that measure the memory layer's contribution.
+    memory_disabled: bool = False
     memory_retrieval_limit: int = Field(default=8, ge=1, le=20)
     memory_context_max_items: int = Field(default=5, ge=1, le=5)
     memory_context_max_chars: int = Field(default=1200, ge=100, le=10000)

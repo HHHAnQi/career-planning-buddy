@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -148,6 +148,7 @@ class RuntimeConfigSnapshot(StrictModel):
     deadline_seconds: int = Field(ge=1)
     node_timeouts_seconds: dict[str, float]
     memory_semantic_retrieval_enabled: bool = True
+    memory_disabled: bool = False
     memory_retrieval_limit: int = Field(default=8, ge=1, le=20)
     memory_context_max_items: int = Field(default=5, ge=1, le=5)
     memory_context_max_chars: int = Field(default=1200, ge=100, le=10000)
@@ -405,6 +406,9 @@ class ProviderUsage(StrictModel):
 class ProviderPlanResponse(StrictModel):
     candidate: PlanCandidate
     usage: ProviderUsage
+    # Optional LLM violation-type classification emitted by the
+    # business-repair prompt; None on every non-repair path.
+    violation_category: Annotated[str | None, Field(max_length=64)] = None
 
 
 class ProviderToolCall(StrictModel):
@@ -423,6 +427,33 @@ class AgentTurnResponse(StrictModel):
         if (self.final is None) == (not self.tool_calls):
             raise ValueError("AgentTurn must contain exactly one of final or tool_calls")
         return self
+
+
+class MemoryParcel(StrictModel):
+    """Output of the parallel memory_loader node (L2 Personal layer)."""
+
+    selected: list[MemoryContext] = Field(default_factory=list)
+    query_hash: str = ""
+    pinned_count: int = 0
+    semantic_count: int = 0
+    fallback_used: bool = False
+    retrieval_failed: bool = False
+    retrieval_latency_ms: int = 0
+
+
+class HistoryParcel(StrictModel):
+    """Output of the parallel evidence_loader node (plans/reviews/history)."""
+
+    source_plan: PlanContext | None = None
+    source_review: ReviewContext | None = None
+    source_plan_id: UUID | None = None
+    source_plan_version: int | None = None
+    planning_date: date | None = None
+    recent_tasks: list[TaskContext] = Field(default_factory=list)
+    recent_reviews: list[ReviewContext] = Field(default_factory=list)
+    completed_facts: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    interview_training_actions: list[str] = Field(default_factory=list)
 
 
 class PlanningState(TypedDict, total=False):
@@ -452,6 +483,11 @@ class PlanningState(TypedDict, total=False):
     # Rule codes that deterministic repair cannot handle; persisted for the
     # offline rule-iteration loop (unknown-rule backlog).
     unknown_rule_codes: list[str]
+    # LLM-assigned violation type label from the business-repair prompt.
+    violation_category: str
+    # Parallel context fan-out parcels (memory_loader ∥ evidence_loader).
+    memory_parcel: MemoryParcel
+    history_parcel: HistoryParcel
 
 
 class AgentEventPayload(StrictModel):

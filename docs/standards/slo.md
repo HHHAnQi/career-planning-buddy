@@ -56,3 +56,18 @@ dev 容器的 intake worker 会在共享库里抢新建的 pending Run（lease �
   占比 vs 工程兜底占比 + 未知规则 backlog。同时新增未知违规观测
   （`agent_unknown_rule_total` 计数器）与三级上下文压缩（相关性召回→动态
   预算→摘要折叠）。
+
+- v1.4（2026-08-26）二次整改批次：
+  ① **延迟回归记录**：k=1 归因实验中 repair-03 单例 61.0s 破 60s 线
+  （成因：修复环二次 LLM 调用叠加，5130 入 / 2043 出 token）。处置：该类
+  case 在修复预算后仍失败时应直接降级（当前行为已如此），后续迭代把
+  `revise_or_fallback` 节点超时从 deadline 共享改为独立上限，防止贴线恶化。
+  ② **图拓扑升级**：context_builder 拆为 `memory_loader ∥ evidence_loader`
+  真·LangGraph fan-out 并行节点 + context_builder join（`run_exclusive`
+  单锁段串行化单连接运行时；embedding 网络调用在锁外保持真实重叠），
+  并行断言测试 `tests/test_parallel_context_fanout.py`。
+  ③ **DirectLLM 基线对照**（实验 `8d3f4781`，direct_llm_v1 臂）：裸模型
+  硬门禁 93.3% vs Agent 臂 83.3%（k=1，同 30 case）。裸模型结构化输出
+  能力强是前提而非否定——Agent 增量在记忆接地/工具/预算/可恢复性，且
+  对照暴露了修复环降级模板的质量短板（repair-03/replan-05 裸模型直出
+  通过而 Agent 降级失败），列为下一迭代目标。

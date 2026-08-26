@@ -53,7 +53,13 @@ QUERY = text(
              WHERE e.run_id = t.run_id
                AND e.event_type = 'run.provenance'
              ORDER BY e.sequence DESC
-             LIMIT 1) AS unknown_rule_codes
+             LIMIT 1) AS unknown_rule_codes,
+           (SELECT e.payload_json ->> 'violation_category'
+              FROM agent_events e
+             WHERE e.run_id = t.run_id
+               AND e.event_type = 'run.provenance'
+             ORDER BY e.sequence DESC
+             LIMIT 1) AS violation_category
       FROM eval_trials t
       JOIN eval_scores s ON s.trial_id = t.id
       JOIN eval_experiments x ON x.id = t.experiment_id
@@ -90,6 +96,9 @@ async def build_report(experiment_id: str | None) -> dict[str, object]:
         for row in trials
         for code in (row.unknown_rule_codes or [])
     )
+    llm_categories = Counter(
+        row.violation_category for row in trials if row.violation_category
+    )
     return {
         "trial_count": len(rows),
         "attributable_count": len(trials),
@@ -121,6 +130,14 @@ async def build_report(experiment_id: str | None) -> dict[str, object]:
             else None
         ),
         "unknown_rule_backlog": dict(unknown_rules),
+        "llm_violation_categories": dict(llm_categories),
+        # Iteration loop: any unknown code seen >=3 times in one experiment
+        # is a promotion candidate for the deterministic rule base.
+        "rule_promotion_candidates": {
+            code: count
+            for code, count in unknown_rules.items()
+            if count >= 3
+        },
     }
 
 
@@ -157,7 +174,13 @@ def render(report: dict[str, object]) -> str:
     if backlog:
         lines += ["", "未知规则沉淀（离线迭代候选）:"]
         for code, count in sorted(backlog.items(), key=lambda kv: -kv[1]):
-            lines.append(f"  {code:<32} {count:>4}")
+            promote = "  → 建议提升为确定性规则（≥3 次）" if count >= 3 else ""
+            lines.append(f"  {code:<32} {count:>4}{promote}")
+    categories = report["llm_violation_categories"]
+    if categories:
+        lines += ["", "LLM 违规类型归类分布:"]
+        for label, count in sorted(categories.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {label:<32} {count:>4}")
     return "\n".join(lines)
 
 

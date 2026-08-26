@@ -55,7 +55,9 @@ from app.schemas.agent_runs import (
     ClarificationRequest,
     EvidenceCatalogItem,
     EvidenceVisibility,
+    HistoryParcel,
     IntentResult,
+    MemoryParcel,
     MemoryContext,
     NavigationResult,
     PlanCandidate,
@@ -152,6 +154,11 @@ class FixedPlanningGraph:
     ) -> None:
         self._session_factory = session_factory
         self._checkpoints = CheckpointStore(session_factory)
+        # Serializes DB transaction phases of the parallel context loaders:
+        # required for single-connection runtimes (tests), while the
+        # network-bound embedding phase stays outside the lock so the two
+        # branches still genuinely overlap on engine-pooled deployments.
+        self._context_db_lock = asyncio.Lock()
         self._provider = provider
         self._nodes = node_runner
         self._finalizer = finalizer
@@ -173,6 +180,8 @@ class FixedPlanningGraph:
         builder.add_node("intent_router", self._intent_node)
         builder.add_node("navigation", self._navigation_node)
         builder.add_node("clarification", self._clarification_node)
+        builder.add_node("memory_loader", self._memory_loader_node)
+        builder.add_node("evidence_loader", self._evidence_loader_node)
         builder.add_node("context_builder", self._context_node)
         builder.add_node("career_planning_agent", self._agent_node)
         builder.add_node("rule_validator", self._validator_node)
@@ -186,17 +195,14 @@ class FixedPlanningGraph:
             {"high": "safe_response", "safe": "intent_router"},
         )
         builder.add_edge("safe_response", END)
-        builder.add_conditional_edges(
-            "intent_router",
-            self._after_intent,
-            {
-                "navigation": "navigation",
-                "clarification": "clarification",
-                "ready": "context_builder",
-            },
-        )
+        # LangGraph native fan-out: the router returns BOTH loader nodes,
+        # so they execute in the same superstep; context_builder joins
+        # their parcels (each branch writes a disjoint state key).
+        builder.add_conditional_edges("intent_router", self._route_after_intent)
         builder.add_edge("navigation", END)
         builder.add_edge("clarification", END)
+        builder.add_edge("memory_loader", "context_builder")
+        builder.add_edge("evidence_loader", "context_builder")
         builder.add_edge("context_builder", "career_planning_agent")
         builder.add_edge("career_planning_agent", "rule_validator")
         builder.add_conditional_edges(
@@ -353,10 +359,132 @@ class FixedPlanningGraph:
         )
 
     async def _context_node(self, state: PlanningState) -> dict[str, object]:
+        """Join node: merges the memory_loader ∥ evidence_loader parcels,
+        applies three-stage compression, and persists the input snapshot."""
+
+        async def merge() -> NodeOutput[tuple[PlanningContext, list[EvidenceCatalogItem]]]:
+            profile = state["profile"]
+            intent = state["intent"]
+            if profile is None or intent.effective_goal_type is None:
+                raise StructuredOutputError(
+                    "planning context requires a complete profile"
+                )
+            memory_parcel = state.get("memory_parcel") or MemoryParcel()
+            history = state.get("history_parcel") or HistoryParcel()
+            config = state["runtime_config"]
+            context = build_planning_context(
+                profile=profile,
+                requested_horizon_weeks=intent.requested_horizon_weeks,
+                source_plan_id=history.source_plan_id,
+                source_plan_version=history.source_plan_version,
+                source_plan=history.source_plan,
+                source_review=history.source_review,
+                recent_tasks=history.recent_tasks,
+                recent_reviews=history.recent_reviews,
+                completed_facts=history.completed_facts,
+                blockers=history.blockers,
+                planning_date=history.planning_date,
+            )
+            context = context.model_copy(
+                update={
+                    "pinned_memories": memory_parcel.selected,
+                    "source_interview_report_session_id": (
+                        state["request"].source_interview_report_session_id
+                    ),
+                    "interview_training_actions": history.interview_training_actions,
+                }
+            )
+            compression = compress_context_history(
+                context,
+                recent_tasks_budget=config.context_recent_tasks_budget,
+                recent_reviews_budget=config.context_recent_reviews_budget,
+                focus_query=state["request"].message,
+                max_context_tokens=config.max_input_tokens_per_call,
+            )
+            context = compression.context
+            if compression.promoted_task_count or compression.budget_shrink_steps:
+                logger.info(
+                    "agent.context.compression",
+                    extra={
+                        "run_id": str(state["run_id"]),
+                        "promoted_task_count": compression.promoted_task_count,
+                        "budget_shrink_steps": compression.budget_shrink_steps,
+                        "task_compressed_count": compression.task_compressed_count,
+                        "before_chars": compression.before_chars,
+                        "after_chars": compression.after_chars,
+                    },
+                )
+            evidence_catalog = [
+                EvidenceCatalogItem(
+                    kind="memory",
+                    id=memory.memory_id,
+                    title=memory.memory_type,
+                    content=memory.summary,
+                    reliability=0.9,
+                )
+                for memory in memory_parcel.selected
+            ]
+            snapshot = RunInputSnapshot(
+                profile=profile,
+                planning_window=context.planning_window,
+                source_plan_id=context.source_plan_id,
+                source_plan_version=context.source_plan_version,
+                source_plan=context.source_plan,
+                source_review=context.source_review,
+                source_interview_report_session_id=(
+                    context.source_interview_report_session_id
+                ),
+                interview_training_actions=context.interview_training_actions,
+                recent_tasks=context.recent_tasks,
+                recent_reviews=context.recent_reviews,
+                completed_facts=history.completed_facts,
+                blockers=context.blockers,
+                pinned_memories=context.pinned_memories,
+                task_history_summary=context.task_history_summary,
+                review_history_summary=context.review_history_summary,
+                recent_task_ids=[task.task_id for task in history.recent_tasks],
+                recent_review_ids=[
+                    review.review_id for review in history.recent_reviews
+                ],
+                memory_versions={
+                    str(memory.memory_id): memory.version
+                    for memory in context.pinned_memories
+                },
+                timezone=context.timezone,
+                time_budget_minutes=context.time_budget_minutes,
+            )
+            async with self._session_factory() as session:
+                async with session_transaction(session):
+                    await SnapshotService.write_input_once(
+                        session, state["run_id"], snapshot
+                    )
+            return NodeOutput(
+                (context, evidence_catalog),
+                NodeTelemetry(
+                    trace_data={
+                        "token_estimate": context.token_estimate,
+                        "horizon_weeks": context.planning_window.horizon_weeks,
+                        "context_chars_before": compression.before_chars,
+                        "context_chars_after": compression.after_chars,
+                        "compressed_task_count": compression.task_compressed_count,
+                        "compressed_review_count": compression.review_compressed_count,
+                        "memory_query_hash": memory_parcel.query_hash,
+                        "pinned_memory_count": memory_parcel.pinned_count,
+                        "semantic_memory_count": memory_parcel.semantic_count,
+                        "selected_memory_ids": [
+                            str(item.memory_id) for item in memory_parcel.selected
+                        ],
+                        "memory_fallback_used": memory_parcel.fallback_used,
+                        "memory_retrieval_failed": memory_parcel.retrieval_failed,
+                        "memory_retrieval_latency_ms": memory_parcel.retrieval_latency_ms,
+                    }
+                ),
+            )
+
         context, evidence_catalog = await self._nodes.run(
             state["run_id"],
             "context_builder",
-            lambda: self._build_context(state),
+            merge,
         )
         return {
             "planning_context": context,
@@ -418,6 +546,7 @@ class FixedPlanningGraph:
             "repair_count": state.get("repair_count", 0) + 1,
             "plan_provenance": state.get("plan_provenance"),
             "unknown_rule_codes": state.get("unknown_rule_codes", []),
+            "violation_category": state.get("violation_category"),
         }
 
     async def _companion_node(self, state: PlanningState) -> dict[str, object]:
@@ -448,6 +577,7 @@ class FixedPlanningGraph:
                         "validation_attempt": state.get("validation_attempt", 0),
                         "fallback_reason": state.get("fallback_reason"),
                         "unknown_rule_codes": state.get("unknown_rule_codes", []),
+                        "violation_category": state.get("violation_category"),
                     },
                 )
         persist_step = await self._nodes.start_step(run_id, "persist")
@@ -477,263 +607,547 @@ class FixedPlanningGraph:
         return "ready"
 
     @staticmethod
+    def _route_after_intent(state: PlanningState) -> str | list[str]:
+        """Routing function for the conditional edge: returns node names
+        (a list means fan-out — every listed node runs concurrently)."""
+        branch = FixedPlanningGraph._after_intent(state)
+        if branch == "ready":
+            return ["memory_loader", "evidence_loader"]
+        return branch
+
+    @staticmethod
     def _after_validation(state: PlanningState) -> str:
         if state["validation_report"].passed or state.get("fallback_reason") is not None:
             return "passed"
         return "repair"
 
-    async def _build_context(
-        self, state: PlanningState
-    ) -> NodeOutput[tuple[PlanningContext, list[EvidenceCatalogItem]]]:
-        profile = state["profile"]
+    async def _memory_loader_node(self, state: PlanningState) -> dict[str, object]:
+        """Parallel branch 1: L2 Personal memory retrieval.
+
+        Pre-phase (outside the recorded step): a short locked read for the
+        query context, then the UNLOCKED embedding call — the network-bound
+        part that genuinely overlaps evidence_loader's DB work. The
+        recorded step then runs exclusively under the shared context lock.
+        """
+        from time import monotonic
+
+        from app.agent.context_selection import build_memory_query
+
+        run_id = state["run_id"]
         intent = state["intent"]
-        if profile is None or intent.effective_goal_type is None:
-            raise StructuredOutputError("planning context requires a complete profile")
-        source_plan: Plan | None = None
-        source_review: Review | None = None
-        recent_tasks: list[TaskContext] = []
-        recent_reviews: list[ReviewContext] = []
-        completed_facts: list[str] = []
+        config = state["runtime_config"]
+        if config.memory_disabled or intent.effective_goal_type is None:
+            return {"memory_parcel": MemoryParcel()}
+
         blockers: list[str] = []
-        selected_memories: list[MemoryContext] = []
-        interview_training_actions: list[str] = []
-        async with self._session_factory() as session:
-            async with session_transaction(session):
-                plans = PlanRepository(session)
-                if state["request"].source_plan_id is not None:
-                    source_plan = await plans.get_for_user(
-                        state["request"].source_plan_id,
-                        state["user_id"],
-                    )
-                reviews = ReviewRepository(session)
-                if state["request"].source_review_id is not None:
-                    source_review = await reviews.get_for_user(
-                        state["request"].source_review_id,
-                        state["user_id"],
-                    )
-                    if (
-                        source_review is None
-                        or source_plan is None
-                        or source_review.plan_id != source_plan.id
-                    ):
-                        raise StructuredOutputError(
-                            "source Review and source Plan must belong to the Run user"
-                        )
-                task_rows = await plans.recent_tasks(state["user_id"], limit=30)
-                recent_tasks = [
-                    TaskContext(
-                        task_id=task.id,
-                        state=TaskStatus(task.state),
-                        title=task.title,
-                        deliverable=task.deliverable,
-                        scheduled_date=task.scheduled_date,
-                        abandoned_reason=task.abandoned_reason,
-                        abandoned_reason_text=task.abandoned_reason_text,
-                    )
-                    for task in task_rows
-                ]
-                completed_facts = [
-                    task.deliverable for task in task_rows if task.state == "completed"
-                ][:20]
-                blockers = [
-                    task.abandoned_reason_text or task.deliverable
-                    for task in task_rows
-                    if task.state == "abandoned"
-                ][:10]
-                if source_plan is not None:
-                    review_rows = await reviews.recent_for_plan(
-                        state["user_id"],
-                        source_plan.id,
-                        limit=7,
-                    )
-                    recent_reviews = [self._review_context(item) for item in review_rows]
-                if source_review is not None and source_review.blockers:
-                    blockers.insert(0, source_review.blockers)
-                    blockers = list(dict.fromkeys(blockers))[:10]
-                report_session_id = state["request"].source_interview_report_session_id
-                if report_session_id is not None:
-                    report_session = await InterviewRepository(session).get_session(
-                        report_session_id, state["user_id"]
-                    )
-                    if report_session is None or report_session.report_json is None:
-                        raise StructuredOutputError(
-                            "source Interview Report must belong to the Run user"
-                        )
-                    raw_actions = report_session.report_json.get(
-                        "recommended_training_actions", []
-                    )
-                    actions = raw_actions if isinstance(raw_actions, list) else []
-                    interview_training_actions = [
-                        str(item.get("title")) + "：" + str(item.get("deliverable"))
-                        for item in actions
-                        if (
-                            isinstance(item, dict)
-                            and item.get("title")
-                            and item.get("deliverable")
-                            and str(item.get("title")) in state["request"].message
-                        )
-                    ][:3]
-        memory_selection = MemorySelectionResult(
-            selected=[],
-            query_hash="",
-            pinned_count=0,
-            semantic_count=0,
-            fallback_used=False,
-            retrieval_failed=False,
-        )
-        try:
+        adjustment_request: str | None = None
+        async with self._context_db_lock:
             async with self._session_factory() as session:
                 async with session_transaction(session):
-                    config = state["runtime_config"]
-                    memory_selection = await select_memories(
-                        repository=EvidenceRepository(session),
-                        embedding_provider=self._embedding_provider,
-                        user_id=state["user_id"],
-                        user_message=state["request"].message,
-                        goal_type=intent.effective_goal_type.value,
-                        blockers=blockers,
-                        adjustment_request=(
-                            source_review.adjustment_request if source_review else None
-                        ),
-                        semantic_enabled=config.memory_semantic_retrieval_enabled,
-                        retrieval_limit=config.memory_retrieval_limit,
-                        max_items=config.memory_context_max_items,
-                        max_chars=config.memory_context_max_chars,
-                        min_similarity=config.memory_min_similarity,
-                        half_life_days=config.memory_recency_half_life_days,
-                        exclude_categories=set(config.exclude_memory_categories)
-                        if config.exclude_memory_categories
-                        else None,
+                    plans = PlanRepository(session)
+                    reviews = ReviewRepository(session)
+                    source_review: Review | None = None
+                    if state["request"].source_review_id is not None:
+                        source_review = await reviews.get_for_user(
+                            state["request"].source_review_id,
+                            state["user_id"],
+                        )
+                    task_rows = await plans.recent_tasks(state["user_id"], limit=30)
+                    blockers = [
+                        task.abandoned_reason_text or task.deliverable
+                        for task in task_rows
+                        if task.state == "abandoned"
+                    ][:10]
+                    if source_review is not None and source_review.blockers:
+                        blockers.insert(0, source_review.blockers)
+                        blockers = list(dict.fromkeys(blockers))[:10]
+                    adjustment_request = (
+                        source_review.adjustment_request if source_review else None
                     )
-        except Exception:
-            memory_selection = memory_selection.__class__(
+        query = build_memory_query(
+            user_message=state["request"].message,
+            goal_type=intent.effective_goal_type.value,
+            blockers=blockers,
+            adjustment_request=adjustment_request,
+        )
+        vector: list[float] | None = None
+        if config.memory_semantic_retrieval_enabled and query:
+            try:
+                vectors = await self._embedding_provider.embed([query])
+                vector = vectors[0] if vectors else None
+            except Exception:
+                vector = None
+
+        async def work() -> NodeOutput[dict[str, object]]:
+            started = monotonic()
+            memory_selection = MemorySelectionResult(
                 selected=[],
-                query_hash=memory_selection.query_hash,
+                query_hash="",
                 pinned_count=0,
                 semantic_count=0,
+                fallback_used=False,
+                retrieval_failed=False,
+            )
+            try:
+                async with self._session_factory() as session:
+                    async with session_transaction(session):
+                        memory_selection = await select_memories(
+                            repository=EvidenceRepository(session),
+                            embedding_provider=self._embedding_provider,
+                            user_id=state["user_id"],
+                            user_message=state["request"].message,
+                            goal_type=intent.effective_goal_type.value,
+                            blockers=blockers,
+                            adjustment_request=adjustment_request,
+                            semantic_enabled=config.memory_semantic_retrieval_enabled,
+                            retrieval_limit=config.memory_retrieval_limit,
+                            max_items=config.memory_context_max_items,
+                            max_chars=config.memory_context_max_chars,
+                            min_similarity=config.memory_min_similarity,
+                            half_life_days=config.memory_recency_half_life_days,
+                            exclude_categories=(
+                                set(config.exclude_memory_categories)
+                                if config.exclude_memory_categories
+                                else None
+                            ),
+                            precomputed_vector=vector,
+                        )
+            except Exception:
+                memory_selection = memory_selection.__class__(
+                    selected=[],
+                    query_hash=memory_selection.query_hash,
+                    pinned_count=0,
+                    semantic_count=0,
+                    fallback_used=memory_selection.fallback_used,
+                    retrieval_failed=True,
+                )
+            parcel = MemoryParcel(
+                selected=[
+                    MemoryContext(
+                        memory_id=memory.memory_id,
+                        version=memory.version,
+                        memory_type=memory.memory_type,
+                        summary=memory.summary,
+                    )
+                    for memory in memory_selection.selected
+                ],
+                query_hash=memory_selection.query_hash,
+                pinned_count=memory_selection.pinned_count,
+                semantic_count=memory_selection.semantic_count,
                 fallback_used=memory_selection.fallback_used,
-                retrieval_failed=True,
+                retrieval_failed=memory_selection.retrieval_failed,
+                retrieval_latency_ms=int((monotonic() - started) * 1000),
             )
-        selected_memories = [
-            MemoryContext(
-                memory_id=memory.memory_id,
-                version=memory.version,
-                memory_type=memory.memory_type,
-                summary=memory.summary,
-            )
-            for memory in memory_selection.selected
-        ]
-        plan_context = self._plan_context(source_plan) if source_plan else None
-        review_context = self._review_context(source_review) if source_review else None
-        planning_date = None
-        if source_plan is not None:
-            planning_date = max(
-                product_today(),
-                source_plan.plan_date + timedelta(days=7),
-            )
-        context = build_planning_context(
-            profile=profile,
-            requested_horizon_weeks=intent.requested_horizon_weeks,
-            source_plan_id=source_plan.id if source_plan else None,
-            source_plan_version=source_plan.version if source_plan else None,
-            source_plan=plan_context,
-            source_review=review_context,
-            recent_tasks=recent_tasks,
-            recent_reviews=recent_reviews,
-            completed_facts=completed_facts,
-            blockers=blockers,
-            planning_date=planning_date,
-        )
-        context = context.model_copy(
-            update={
-                "pinned_memories": selected_memories,
-                "source_interview_report_session_id": (
-                    state["request"].source_interview_report_session_id
-                ),
-                "interview_training_actions": interview_training_actions,
-            }
-        )
-        compression = compress_context_history(
-            context,
-            recent_tasks_budget=config.context_recent_tasks_budget,
-            recent_reviews_budget=config.context_recent_reviews_budget,
-            focus_query=state["request"].message,
-            max_context_tokens=config.max_input_tokens_per_call,
-        )
-        context = compression.context
-        if compression.promoted_task_count or compression.budget_shrink_steps:
-            logger.info(
-                "agent.context.compression",
-                extra={
-                    "run_id": str(state["run_id"]),
-                    "promoted_task_count": compression.promoted_task_count,
-                    "budget_shrink_steps": compression.budget_shrink_steps,
-                    "task_compressed_count": compression.task_compressed_count,
-                    "before_chars": compression.before_chars,
-                    "after_chars": compression.after_chars,
+            return await self._immediate(
+                {"memory_parcel": parcel},
+                {
+                    "selected_memory_count": len(parcel.selected),
+                    "pinned_count": parcel.pinned_count,
+                    "semantic_count": parcel.semantic_count,
+                    "fallback_used": parcel.fallback_used,
+                    "retrieval_failed": parcel.retrieval_failed,
+                    "retrieval_latency_ms": parcel.retrieval_latency_ms,
                 },
             )
-        evidence_catalog = [
-            EvidenceCatalogItem(
-                kind="memory",
-                id=memory.memory_id,
-                title=memory.memory_type,
-                content=memory.summary,
-                reliability=0.9,
-            )
-            for memory in selected_memories
-        ]
-        snapshot = RunInputSnapshot(
-            profile=profile,
-            planning_window=context.planning_window,
-            source_plan_id=context.source_plan_id,
-            source_plan_version=context.source_plan_version,
-            source_plan=context.source_plan,
-            source_review=context.source_review,
-            source_interview_report_session_id=context.source_interview_report_session_id,
-            interview_training_actions=context.interview_training_actions,
-            recent_tasks=context.recent_tasks,
-            recent_reviews=context.recent_reviews,
-            completed_facts=completed_facts,
-            blockers=context.blockers,
-            pinned_memories=context.pinned_memories,
-            task_history_summary=context.task_history_summary,
-            review_history_summary=context.review_history_summary,
-            recent_task_ids=[task.task_id for task in recent_tasks],
-            recent_review_ids=[review.review_id for review in recent_reviews],
-            memory_versions={
-                str(memory.memory_id): memory.version for memory in context.pinned_memories
-            },
-            timezone=context.timezone,
-            time_budget_minutes=context.time_budget_minutes,
+
+        return await self._nodes.run_exclusive(
+            run_id,
+            "memory_loader",
+            work,
+            lock=self._context_db_lock,
         )
-        async with self._session_factory() as session:
-            async with session_transaction(session):
-                await SnapshotService.write_input_once(session, state["run_id"], snapshot)
-        return NodeOutput(
-            (context, evidence_catalog),
-            NodeTelemetry(
-                trace_data={
-                    "token_estimate": context.token_estimate,
-                    "horizon_weeks": context.planning_window.horizon_weeks,
-                    "context_chars_before": compression.before_chars,
-                    "context_chars_after": compression.after_chars,
-                    "compressed_task_count": compression.task_compressed_count,
-                    "compressed_review_count": compression.review_compressed_count,
-                    "memory_query_hash": memory_selection.query_hash,
-                    "pinned_memory_count": memory_selection.pinned_count,
-                    "semantic_memory_count": memory_selection.semantic_count,
-                    "selected_memory_ids": [
-                        str(item.memory_id) for item in memory_selection.selected
-                    ],
-                    "selected_memory_scores": [
-                        round(item.final_score, 6) for item in memory_selection.selected
-                    ],
-                    "memory_fallback_used": memory_selection.fallback_used,
-                    "memory_retrieval_failed": memory_selection.retrieval_failed,
-                }
+
+    async def _evidence_loader_node(self, state: PlanningState) -> dict[str, object]:
+        """Parallel branch 2: source plan/review, task history, interview
+        actions — every DB read the planning context needs except memory.
+        Runs exclusively under the shared context lock so the two fan-out
+        branches never interleave transactions on a single connection."""
+
+        async def load() -> HistoryParcel:
+            source_plan: Plan | None = None
+            source_review: Review | None = None
+            recent_tasks: list[TaskContext] = []
+            recent_reviews: list[ReviewContext] = []
+            completed_facts: list[str] = []
+            blockers: list[str] = []
+            interview_training_actions: list[str] = []
+            async with self._session_factory() as session:
+                async with session_transaction(session):
+                    plans = PlanRepository(session)
+                    if state["request"].source_plan_id is not None:
+                        source_plan = await plans.get_for_user(
+                            state["request"].source_plan_id,
+                            state["user_id"],
+                        )
+                    reviews = ReviewRepository(session)
+                    if state["request"].source_review_id is not None:
+                        source_review = await reviews.get_for_user(
+                            state["request"].source_review_id,
+                            state["user_id"],
+                        )
+                        if (
+                            source_review is None
+                            or source_plan is None
+                            or source_review.plan_id != source_plan.id
+                        ):
+                            raise StructuredOutputError(
+                                "source Review and source Plan must belong to the Run user"
+                            )
+                    task_rows = await plans.recent_tasks(state["user_id"], limit=30)
+                    recent_tasks = [
+                        TaskContext(
+                            task_id=task.id,
+                            state=TaskStatus(task.state),
+                            title=task.title,
+                            deliverable=task.deliverable,
+                            scheduled_date=task.scheduled_date,
+                            abandoned_reason=task.abandoned_reason,
+                            abandoned_reason_text=task.abandoned_reason_text,
+                        )
+                        for task in task_rows
+                    ]
+                    completed_facts = [
+                        task.deliverable
+                        for task in task_rows
+                        if task.state == "completed"
+                    ][:20]
+                    blockers = [
+                        task.abandoned_reason_text or task.deliverable
+                        for task in task_rows
+                        if task.state == "abandoned"
+                    ][:10]
+                    if source_plan is not None:
+                        review_rows = await reviews.recent_for_plan(
+                            state["user_id"],
+                            source_plan.id,
+                            limit=7,
+                        )
+                        recent_reviews = [
+                            self._review_context(item) for item in review_rows
+                        ]
+                    if source_review is not None and source_review.blockers:
+                        blockers.insert(0, source_review.blockers)
+                        blockers = list(dict.fromkeys(blockers))[:10]
+                    report_session_id = (
+                        state["request"].source_interview_report_session_id
+                    )
+                    if report_session_id is not None:
+                        report_session = await InterviewRepository(
+                            session
+                        ).get_session(report_session_id, state["user_id"])
+                        if report_session is None or report_session.report_json is None:
+                            raise StructuredOutputError(
+                                "source Interview Report must belong to the Run user"
+                            )
+                        raw_actions = report_session.report_json.get(
+                            "recommended_training_actions", []
+                        )
+                        actions = raw_actions if isinstance(raw_actions, list) else []
+                        interview_training_actions = [
+                            str(item.get("title")) + "：" + str(item.get("deliverable"))
+                            for item in actions
+                            if (
+                                isinstance(item, dict)
+                                and item.get("title")
+                                and item.get("deliverable")
+                                and str(item.get("title")) in state["request"].message
+                            )
+                        ][:3]
+            planning_date = None
+            if source_plan is not None:
+                planning_date = max(
+                    product_today(),
+                    source_plan.plan_date + timedelta(days=7),
+                )
+            return HistoryParcel(
+                source_plan=self._plan_context(source_plan) if source_plan else None,
+                source_review=(
+                    self._review_context(source_review) if source_review else None
+                ),
+                source_plan_id=source_plan.id if source_plan else None,
+                source_plan_version=source_plan.version if source_plan else None,
+                planning_date=planning_date,
+                recent_tasks=recent_tasks,
+                recent_reviews=recent_reviews,
+                completed_facts=completed_facts,
+                blockers=blockers,
+                interview_training_actions=interview_training_actions,
+            )
+
+        async def work() -> NodeOutput[dict[str, object]]:
+            parcel = await load()
+            return await self._immediate(
+                {"history_parcel": parcel},
+                {
+                    "source_plan_present": parcel.source_plan is not None,
+                    "recent_task_count": len(parcel.recent_tasks),
+                    "recent_review_count": len(parcel.recent_reviews),
+                    "interview_action_count": len(parcel.interview_training_actions),
+                },
+            )
+
+        return await self._nodes.run_exclusive(
+            state["run_id"],
+            "evidence_loader",
+            work,
+            lock=self._context_db_lock,
+        )
+
+    async def _agent_node(self, state: PlanningState) -> dict[str, object]:
+        candidate, evidence_catalog, visibility, tool_round, tool_call_count = (
+            await self._nodes.run_with_step(
+                state["run_id"],
+                "career_planning_agent",
+                lambda step_id: self._generate_candidate(state, step_id),
+            )
+        )
+        result: dict[str, object] = {
+            "candidate_plan": candidate,
+            "evidence_catalog": evidence_catalog,
+            "candidate_evidence_visibility": visibility,
+            "tool_round": tool_round,
+            "tool_call_count": tool_call_count,
+        }
+        if state.get("fallback_reason") is not None:
+            result["fallback_reason"] = state["fallback_reason"]
+        if state.get("plan_provenance") is not None:
+            result["plan_provenance"] = state["plan_provenance"]
+        return result
+
+    async def _validator_node(self, state: PlanningState) -> dict[str, object]:
+        attempt = state.get("validation_attempt", 0) + 1
+        validation = await self._nodes.run(
+            state["run_id"],
+            "rule_validator",
+            lambda: self._validate_with_trace(
+                state["candidate_plan"],
+                state["planning_context"],
+                state["candidate_evidence_visibility"],
+                attempt,
+            ),
+            attempt=attempt,
+        )
+        return {
+            "validation_report": validation,
+            "validation_attempt": attempt,
+        }
+
+    async def _revise_node(self, state: PlanningState) -> dict[str, object]:
+        candidate, fallback_reason, visibility = await self._nodes.run(
+            state["run_id"],
+            "revise_or_fallback",
+            lambda: self._revise_or_fallback(state),
+            attempt=state.get("repair_count", 0) + 1,
+        )
+        return {
+            "candidate_plan": candidate,
+            "candidate_evidence_visibility": visibility,
+            "fallback_reason": fallback_reason,
+            "repair_count": state.get("repair_count", 0) + 1,
+            "plan_provenance": state.get("plan_provenance"),
+            "unknown_rule_codes": state.get("unknown_rule_codes", []),
+            "violation_category": state.get("violation_category"),
+        }
+
+    async def _companion_node(self, state: PlanningState) -> dict[str, object]:
+        companion = await self._nodes.run(
+            state["run_id"],
+            "companion_response",
+            lambda: self._immediate(
+                build_companion(state["candidate_plan"]),
+                {"template_version": "plan_ready_v1"},
             ),
         )
+        return {"companion": companion}
+
+    async def _persist_node(self, state: PlanningState) -> dict[str, object]:
+        run_id = state["run_id"]
+        provenance = self._derive_provenance(state)
+        AGENT_REPAIR_PATH.inc(make_labels(path=provenance))
+        # Durable attribution event: the eval attribution report joins this
+        # against trial outcomes to split model vs engineering contribution.
+        async with self._session_factory() as session:
+            async with session_transaction(session):
+                await EventRecorder(session).record(
+                    run_id,
+                    "run.provenance",
+                    {
+                        "plan_provenance": provenance,
+                        "repair_count": state.get("repair_count", 0),
+                        "validation_attempt": state.get("validation_attempt", 0),
+                        "fallback_reason": state.get("fallback_reason"),
+                        "unknown_rule_codes": state.get("unknown_rule_codes", []),
+                        "violation_category": state.get("violation_category"),
+                    },
+                )
+        persist_step = await self._nodes.start_step(run_id, "persist")
+        await self._finalizer.finalize_plan(
+            run_id=run_id,
+            user_id=state["user_id"],
+            candidate=state["candidate_plan"],
+            evidence_visibility=state["candidate_evidence_visibility"],
+            companion=state["companion"],
+            persist_step_id=persist_step.id,
+            fallback_reason=state.get("fallback_reason"),
+            simulate_failure="[mock:persist-failure]" in state["request"].message,
+        )
+        return {}
+
+    @staticmethod
+    def _after_risk(state: PlanningState) -> str:
+        return "high" if state["risk"].level == "high" else "safe"
+
+    @staticmethod
+    def _after_intent(state: PlanningState) -> str:
+        intent = state["intent"]
+        if intent.intent == RunIntent.NAVIGATE:
+            return "navigation"
+        if intent.intent == RunIntent.UNSUPPORTED or intent.missing_slots:
+            return "clarification"
+        return "ready"
+
+    @staticmethod
+    def _route_after_intent(state: PlanningState) -> str | list[str]:
+        """Routing function for the conditional edge: returns node names
+        (a list means fan-out — every listed node runs concurrently)."""
+        branch = FixedPlanningGraph._after_intent(state)
+        if branch == "ready":
+            return ["memory_loader", "evidence_loader"]
+        return branch
+
+    @staticmethod
+    def _after_validation(state: PlanningState) -> str:
+        if state["validation_report"].passed or state.get("fallback_reason") is not None:
+            return "passed"
+        return "repair"
+
+    async def _agent_node(self, state: PlanningState) -> dict[str, object]:
+        candidate, evidence_catalog, visibility, tool_round, tool_call_count = (
+            await self._nodes.run_with_step(
+                state["run_id"],
+                "career_planning_agent",
+                lambda step_id: self._generate_candidate(state, step_id),
+            )
+        )
+        result: dict[str, object] = {
+            "candidate_plan": candidate,
+            "evidence_catalog": evidence_catalog,
+            "candidate_evidence_visibility": visibility,
+            "tool_round": tool_round,
+            "tool_call_count": tool_call_count,
+        }
+        if state.get("fallback_reason") is not None:
+            result["fallback_reason"] = state["fallback_reason"]
+        if state.get("plan_provenance") is not None:
+            result["plan_provenance"] = state["plan_provenance"]
+        return result
+
+    async def _validator_node(self, state: PlanningState) -> dict[str, object]:
+        attempt = state.get("validation_attempt", 0) + 1
+        validation = await self._nodes.run(
+            state["run_id"],
+            "rule_validator",
+            lambda: self._validate_with_trace(
+                state["candidate_plan"],
+                state["planning_context"],
+                state["candidate_evidence_visibility"],
+                attempt,
+            ),
+            attempt=attempt,
+        )
+        return {
+            "validation_report": validation,
+            "validation_attempt": attempt,
+        }
+
+    async def _revise_node(self, state: PlanningState) -> dict[str, object]:
+        candidate, fallback_reason, visibility = await self._nodes.run(
+            state["run_id"],
+            "revise_or_fallback",
+            lambda: self._revise_or_fallback(state),
+            attempt=state.get("repair_count", 0) + 1,
+        )
+        return {
+            "candidate_plan": candidate,
+            "candidate_evidence_visibility": visibility,
+            "fallback_reason": fallback_reason,
+            "repair_count": state.get("repair_count", 0) + 1,
+            "plan_provenance": state.get("plan_provenance"),
+            "unknown_rule_codes": state.get("unknown_rule_codes", []),
+            "violation_category": state.get("violation_category"),
+        }
+
+    async def _companion_node(self, state: PlanningState) -> dict[str, object]:
+        companion = await self._nodes.run(
+            state["run_id"],
+            "companion_response",
+            lambda: self._immediate(
+                build_companion(state["candidate_plan"]),
+                {"template_version": "plan_ready_v1"},
+            ),
+        )
+        return {"companion": companion}
+
+    async def _persist_node(self, state: PlanningState) -> dict[str, object]:
+        run_id = state["run_id"]
+        provenance = self._derive_provenance(state)
+        AGENT_REPAIR_PATH.inc(make_labels(path=provenance))
+        # Durable attribution event: the eval attribution report joins this
+        # against trial outcomes to split model vs engineering contribution.
+        async with self._session_factory() as session:
+            async with session_transaction(session):
+                await EventRecorder(session).record(
+                    run_id,
+                    "run.provenance",
+                    {
+                        "plan_provenance": provenance,
+                        "repair_count": state.get("repair_count", 0),
+                        "validation_attempt": state.get("validation_attempt", 0),
+                        "fallback_reason": state.get("fallback_reason"),
+                        "unknown_rule_codes": state.get("unknown_rule_codes", []),
+                        "violation_category": state.get("violation_category"),
+                    },
+                )
+        persist_step = await self._nodes.start_step(run_id, "persist")
+        await self._finalizer.finalize_plan(
+            run_id=run_id,
+            user_id=state["user_id"],
+            candidate=state["candidate_plan"],
+            evidence_visibility=state["candidate_evidence_visibility"],
+            companion=state["companion"],
+            persist_step_id=persist_step.id,
+            fallback_reason=state.get("fallback_reason"),
+            simulate_failure="[mock:persist-failure]" in state["request"].message,
+        )
+        return {}
+
+    @staticmethod
+    def _after_risk(state: PlanningState) -> str:
+        return "high" if state["risk"].level == "high" else "safe"
+
+    @staticmethod
+    def _after_intent(state: PlanningState) -> str:
+        intent = state["intent"]
+        if intent.intent == RunIntent.NAVIGATE:
+            return "navigation"
+        if intent.intent == RunIntent.UNSUPPORTED or intent.missing_slots:
+            return "clarification"
+        return "ready"
+
+    @staticmethod
+    def _route_after_intent(state: PlanningState) -> str | list[str]:
+        """Routing function for the conditional edge: returns node names
+        (a list means fan-out — every listed node runs concurrently)."""
+        branch = FixedPlanningGraph._after_intent(state)
+        if branch == "ready":
+            return ["memory_loader", "evidence_loader"]
+        return branch
+
+    @staticmethod
+    def _after_validation(state: PlanningState) -> str:
+        if state["validation_report"].passed or state.get("fallback_reason") is not None:
+            return "passed"
+        return "repair"
 
     @staticmethod
     def _plan_context(plan: Plan) -> PlanContext:
@@ -901,6 +1315,7 @@ class FixedPlanningGraph:
             if (
                 turn_index == 0
                 and not force_final
+                and not state["runtime_config"].memory_disabled
                 and state["intent"].references_past_context
                 and state["intent"].intent in {RunIntent.CREATE_PLAN, RunIntent.REPLAN}
                 and not any(
@@ -1223,6 +1638,8 @@ class FixedPlanningGraph:
                 ),
             )
         state["plan_provenance"] = "llm_repair"
+        if response.violation_category is not None:
+            state["violation_category"] = response.violation_category
         return NodeOutput(
             (response.candidate, None, visibility),
             self._telemetry(

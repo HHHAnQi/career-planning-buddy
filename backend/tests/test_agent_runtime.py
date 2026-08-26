@@ -149,11 +149,14 @@ async def test_happy_run_persists_plan_tasks_snapshot_and_last_terminal_event(
     assert all(task.starter_action.startswith("1. ") for task in tasks)
     assert all(task.rationale is not None for task in tasks)
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
-    assert [
+    started_nodes = [
         event.payload_json["node_name"] for event in events if event.event_type == "node.started"
-    ] == [
-        "risk_gate",
-        "intent_router",
+    ]
+    # The two context loaders run in the same LangGraph superstep; their
+    # start-event order is scheduler-dependent, so compare as a set.
+    assert started_nodes[:2] == ["risk_gate", "intent_router"]
+    assert set(started_nodes[2:4]) == {"memory_loader", "evidence_loader"}
+    assert started_nodes[4:] == [
         "context_builder",
         "career_planning_agent",
         "rule_validator",

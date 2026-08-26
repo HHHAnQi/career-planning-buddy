@@ -304,10 +304,17 @@ class OpenAICompatiblePlanningProvider:
                 "usage": usage.model_dump(mode="json"),
             }
         candidate = {str(key): value for key, value in candidate_object.items()}
-        return {
+        # The business-repair prompt asks the model to classify the dominant
+        # violation it fixed; lift that label out of the candidate payload
+        # so PlanCandidate validation stays strict.
+        violation_category = candidate.pop("violation_category", None)
+        result: dict[str, object] = {
             "candidate": candidate,
             "usage": usage.model_dump(mode="json"),
         }
+        if isinstance(violation_category, str) and violation_category.strip():
+            result["violation_category"] = violation_category.strip()[:64]
+        return result
 
     async def aclose(self) -> None:
         if self._owns_client:
