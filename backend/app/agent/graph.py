@@ -855,6 +855,27 @@ class FixedPlanningGraph:
                 intent=state["intent"].intent,
                 requires_fresh_information=state["intent"].requires_fresh_information,
             )
+            # Deterministic memory-trigger: when the intent router detected
+            # past-context references, force memory_lookup into the tool
+            # list on the FIRST turn (before the model decides anything).
+            # This bypasses the model's low voluntary tool-invocation rate
+            # (~11% on GLM-4.7) for the memory pathway.
+            if (
+                turn_index == 0
+                and not force_final
+                and state["intent"].references_past_context
+                and state["intent"].intent in {RunIntent.CREATE_PLAN, RunIntent.REPLAN}
+                and not any(spec.name == "memory_lookup" for spec in available_tools)
+            ):
+                all_specs = self._tool_registry.available_specs(
+                    intent=state["intent"].intent,
+                    requires_fresh_information=True,  # force all tools visible
+                )
+                memory_spec = next(
+                    (spec for spec in all_specs if spec.name == "memory_lookup"), None
+                )
+                if memory_spec is not None:
+                    available_tools.append(memory_spec)
             if force_final:
                 available_tools = []
             visible_catalog, visibility = build_evidence_visibility(
@@ -1039,6 +1060,30 @@ class FixedPlanningGraph:
     ) -> NodeOutput[tuple[PlanCandidate, str | None, EvidenceVisibility]]:
         context = state["planning_context"]
         validation = state["validation_report"]
+        failed_codes = [
+            check.code for check in validation.checks if not check.passed
+        ]
+
+        # Deterministic repair first: fix rule violations in code before
+        # burning an LLM call on a repair the model can't do (live eval:
+        # GLM-4.7 business-repair success is 0/6). If code can fix it,
+        # the repaired candidate goes straight to re-validation.
+        from app.agent.deterministic_repair import deterministic_repair
+
+        deterministically_fixed = deterministic_repair(
+            state["candidate_plan"], context, failed_codes
+        )
+        if deterministically_fixed is not None:
+            recheck = validate_candidate(deterministically_fixed, context)
+            if recheck.passed:
+                _, visibility = build_evidence_visibility(
+                    call_id=f"{state['run_id']}:deterministic_repair",
+                    evidence_catalog=list(state.get("evidence_catalog", [])),
+                )
+                return NodeOutput(
+                    (deterministically_fixed, None, visibility),
+                )
+
         if not self._budget.can_reserve_llm_call():
             fallback = fallback_candidate(context, state["intent"].replan_mode)
             _, visibility = build_evidence_visibility(

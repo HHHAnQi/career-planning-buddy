@@ -67,11 +67,13 @@ class OpenAIChatLLMClient:
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
         telemetry: LLMTelemetrySink | None = None,
+        disable_thinking: bool = False,
     ) -> None:
         if not api_key or not base_url:
             raise ProviderConfigurationError("LLM client requires API key and base URL")
         self._endpoint = f"{base_url.rstrip('/')}/chat/completions"
         self._profile = profile
+        self._disable_thinking = disable_thinking
         self._client = httpx.AsyncClient(
             timeout=timeout_seconds,
             transport=transport,
@@ -90,6 +92,13 @@ class OpenAIChatLLMClient:
         started = monotonic()
         try:
             body = self._request_body(request)
+            if self._disable_thinking:
+                # Hybrid reasoning models (GLM-4.7, DeepSeek v4-pro) burn
+                # the output budget on hidden thinking tokens and inflate
+                # latency 3-10x for structured-output tasks that don't
+                # need chain-of-thought. Verified: GLM API accepts this
+                # and returns immediate answers with 1-token completions.
+                body["thinking"] = {"type": "disabled"}
             response = await self._client.post(self._endpoint, json=body)
             self._raise_for_status(response)
             response_text = response.text
@@ -507,6 +516,7 @@ def build_llm_client(
             base_url=base_url,
         ),
         timeout_seconds=settings.llm_timeout_seconds,
+        disable_thinking=settings.llm_disable_thinking,
         transport=transport,
         telemetry=telemetry,
     )

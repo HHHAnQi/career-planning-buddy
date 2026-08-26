@@ -311,6 +311,9 @@ class IntentResult(StrictModel):
     effective_goal_type: GoalType | None
     requested_horizon_weeks: int | None = Field(default=None, ge=1, le=8)
     requires_fresh_information: bool
+    # Deterministic signal: the user's message references their past
+    # execution context — the planning agent should call memory_lookup.
+    references_past_context: bool = False
     method: Literal["rule", "model", "rule_fallback"]
     navigation_action: Literal["view_current_plan", "view_today_tasks"] | None = None
     navigation_target: Literal["/journey", "/today"] | None = None

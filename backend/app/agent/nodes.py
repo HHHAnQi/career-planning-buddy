@@ -184,6 +184,19 @@ def route_intent(
         marker in message
         for marker in ("最新", "当前岗位", "市场信息", "搜索", "[mock:tool-search]")
     )
+    # Deterministic memory-reference detection: when the user's message
+    # explicitly refers to their past execution context, the planning
+    # agent should call memory_lookup even if the model wouldn't
+    # voluntarily do so (live eval: GLM-4.7 voluntary tool trigger is
+    # ~11%). This is the architectural fix for the tool-trigger gap.
+    references_past_context = any(
+        marker in message
+        for marker in (
+            "之前", "上次", "复盘", "经验", "偏好", "习惯",
+            "我之前", "以前", "总结", "教训", "规律", "方法",
+            "past experience", "lessons learned", "review findings",
+        )
+    )
     return IntentResult(
         intent=intent,
         replan_mode=mode,
@@ -196,6 +209,7 @@ def route_intent(
         effective_goal_type=goal_type_override or (profile.goal_type if profile else None),
         requested_horizon_weeks=requested_weeks,
         requires_fresh_information=requires_fresh_information,
+        references_past_context=references_past_context,
         method=method,
         navigation_action=navigation_action,
         navigation_target=navigation_target,

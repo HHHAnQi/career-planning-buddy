@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     llm_goal_understanding_reasoning: Literal["off", "auto"] = "off"
     llm_evidence_distillation_reasoning: Literal["off", "auto"] = "off"
     llm_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    # Disable hybrid reasoning models' hidden thinking tokens (3-10x latency
+    # reduction for structured-output tasks). GLM-4.7, DeepSeek v4-pro verified.
+    llm_disable_thinking: bool = True
     # Wire-level SSE streaming for openai_compatible providers. Off by
     # default: Mock/deterministic paths never stream, and streaming only
     # changes transport, never response semantics.
