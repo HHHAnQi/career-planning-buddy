@@ -220,7 +220,8 @@ def main() -> int:
     scored = [r for r in results if r.met is not None]
     failed = [r for r in scored if not r.met]
     print("=" * 72)
-    print(f"判定: {len(scored) - len(failed)}/{len(scored)} 达标" + ("，存在未达项" if failed else ""))
+    verdict = "，存在未达项" if failed else ""
+    print(f"判定: {len(scored) - len(failed)}/{len(scored)} 达标" + verdict)
     return 1 if failed else 0
 
 

@@ -11,13 +11,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
-from app.models.agent_run import AgentRun
 from app.models.eval import EvalTrial
 from app.models.plan import Plan, Task
 from app.schemas.agent_runs import PlanCandidate, TaskCandidate, WeeklyFocusCandidate

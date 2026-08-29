@@ -41,7 +41,10 @@ ALLOWED_KINDS = frozenset({
 
 
 _FUNCTIONAL = frozenset(
-    "计划 任务 完成 进行 需要 可以 一个 相关 提高 提升 分析 整理 准备 制定 记录 帮助 情况 内容 通过 检查 优化 撰写 梳理".split()
+    (
+        "计划 任务 完成 进行 需要 可以 一个 相关 提高 提升 分析 整理 "
+        "准备 制定 记录 帮助 情况 内容 通过 检查 优化 撰写 梳理"
+    ).split()
 )
 
 
@@ -283,7 +286,6 @@ async def grade(outcome: RunOutcome, view: AuthorizedView, expected: EvalCase) -
                 if part
             )
         plan_bigrams = _text_bigrams(plan_text)
-        plan_ascii = set(re.findall(r"[a-z0-9]+", plan_text.lower()))
         grounded = 0
         for memory in memories:
             memory_bigrams = _text_bigrams(memory)

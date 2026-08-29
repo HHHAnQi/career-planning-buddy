@@ -57,8 +57,8 @@ from app.schemas.agent_runs import (
     EvidenceVisibility,
     HistoryParcel,
     IntentResult,
-    MemoryParcel,
     MemoryContext,
+    MemoryParcel,
     NavigationResult,
     PlanCandidate,
     PlanContext,
@@ -699,6 +699,7 @@ class FixedPlanningGraph:
         config = state["runtime_config"]
         if config.memory_disabled or intent.effective_goal_type is None:
             return {"memory_parcel": MemoryParcel()}
+        goal_type = intent.effective_goal_type
 
         blockers: list[str] = []
         adjustment_request: str | None = None
@@ -760,7 +761,7 @@ class FixedPlanningGraph:
                             embedding_provider=self._embedding_provider,
                             user_id=state["user_id"],
                             user_message=state["request"].message,
-                            goal_type=intent.effective_goal_type.value,
+                            goal_type=goal_type.value,
                             blockers=blockers,
                             adjustment_request=adjustment_request,
                             semantic_enabled=config.memory_semantic_retrieval_enabled,
@@ -970,272 +971,6 @@ class FixedPlanningGraph:
             work,
             lock=self._context_db_lock,
         )
-
-    async def _agent_node(self, state: PlanningState) -> dict[str, object]:
-        candidate, evidence_catalog, visibility, tool_round, tool_call_count = (
-            await self._nodes.run_with_step(
-                state["run_id"],
-                "career_planning_agent",
-                lambda step_id: self._generate_candidate(state, step_id),
-            )
-        )
-        result: dict[str, object] = {
-            "candidate_plan": candidate,
-            "evidence_catalog": evidence_catalog,
-            "candidate_evidence_visibility": visibility,
-            "tool_round": tool_round,
-            "tool_call_count": tool_call_count,
-        }
-        if state.get("fallback_reason") is not None:
-            result["fallback_reason"] = state["fallback_reason"]
-        if state.get("plan_provenance") is not None:
-            result["plan_provenance"] = state["plan_provenance"]
-        return result
-
-    async def _validator_node(self, state: PlanningState) -> dict[str, object]:
-        attempt = state.get("validation_attempt", 0) + 1
-        validation = await self._nodes.run(
-            state["run_id"],
-            "rule_validator",
-            lambda: self._validate_with_trace(
-                state["candidate_plan"],
-                state["planning_context"],
-                state["candidate_evidence_visibility"],
-                attempt,
-            ),
-            attempt=attempt,
-        )
-        return {
-            "validation_report": validation,
-            "validation_attempt": attempt,
-        }
-
-    async def _revise_node(self, state: PlanningState) -> dict[str, object]:
-        candidate, fallback_reason, visibility = await self._nodes.run(
-            state["run_id"],
-            "revise_or_fallback",
-            lambda: self._revise_or_fallback(state),
-            attempt=state.get("repair_count", 0) + 1,
-        )
-        return {
-            "candidate_plan": candidate,
-            "candidate_evidence_visibility": visibility,
-            "fallback_reason": fallback_reason,
-            "repair_count": state.get("repair_count", 0) + 1,
-            "plan_provenance": state.get("plan_provenance"),
-            "unknown_rule_codes": state.get("unknown_rule_codes", []),
-            "violation_category": state.get("violation_category"),
-        }
-
-    async def _companion_node(self, state: PlanningState) -> dict[str, object]:
-        companion = await self._nodes.run(
-            state["run_id"],
-            "companion_response",
-            lambda: self._immediate(
-                build_companion(state["candidate_plan"]),
-                {"template_version": "plan_ready_v1"},
-            ),
-        )
-        return {"companion": companion}
-
-    async def _persist_node(self, state: PlanningState) -> dict[str, object]:
-        run_id = state["run_id"]
-        provenance = self._derive_provenance(state)
-        AGENT_REPAIR_PATH.inc(make_labels(path=provenance))
-        # Durable attribution event: the eval attribution report joins this
-        # against trial outcomes to split model vs engineering contribution.
-        async with self._session_factory() as session:
-            async with session_transaction(session):
-                await EventRecorder(session).record(
-                    run_id,
-                    "run.provenance",
-                    {
-                        "plan_provenance": provenance,
-                        "repair_count": state.get("repair_count", 0),
-                        "validation_attempt": state.get("validation_attempt", 0),
-                        "fallback_reason": state.get("fallback_reason"),
-                        "unknown_rule_codes": state.get("unknown_rule_codes", []),
-                        "violation_category": state.get("violation_category"),
-                    },
-                )
-        persist_step = await self._nodes.start_step(run_id, "persist")
-        await self._finalizer.finalize_plan(
-            run_id=run_id,
-            user_id=state["user_id"],
-            candidate=state["candidate_plan"],
-            evidence_visibility=state["candidate_evidence_visibility"],
-            companion=state["companion"],
-            persist_step_id=persist_step.id,
-            fallback_reason=state.get("fallback_reason"),
-            simulate_failure="[mock:persist-failure]" in state["request"].message,
-        )
-        return {}
-
-    @staticmethod
-    def _after_risk(state: PlanningState) -> str:
-        return "high" if state["risk"].level == "high" else "safe"
-
-    @staticmethod
-    def _after_intent(state: PlanningState) -> str:
-        intent = state["intent"]
-        if intent.intent == RunIntent.NAVIGATE:
-            return "navigation"
-        if intent.intent == RunIntent.UNSUPPORTED or intent.missing_slots:
-            return "clarification"
-        return "ready"
-
-    @staticmethod
-    def _route_after_intent(state: PlanningState) -> str | list[str]:
-        """Routing function for the conditional edge: returns node names
-        (a list means fan-out — every listed node runs concurrently)."""
-        branch = FixedPlanningGraph._after_intent(state)
-        if branch == "ready":
-            config = state.get("runtime_config")
-            if config is not None and not config.context_fanout_enabled:
-                # Serial A/B mode: only the evidence branch runs; it loads
-                # memory inline inside its own lock section.
-                return ["evidence_loader"]
-            return ["memory_loader", "evidence_loader"]
-        return branch
-
-    @staticmethod
-    def _after_validation(state: PlanningState) -> str:
-        if state["validation_report"].passed or state.get("fallback_reason") is not None:
-            return "passed"
-        return "repair"
-
-    async def _agent_node(self, state: PlanningState) -> dict[str, object]:
-        candidate, evidence_catalog, visibility, tool_round, tool_call_count = (
-            await self._nodes.run_with_step(
-                state["run_id"],
-                "career_planning_agent",
-                lambda step_id: self._generate_candidate(state, step_id),
-            )
-        )
-        result: dict[str, object] = {
-            "candidate_plan": candidate,
-            "evidence_catalog": evidence_catalog,
-            "candidate_evidence_visibility": visibility,
-            "tool_round": tool_round,
-            "tool_call_count": tool_call_count,
-        }
-        if state.get("fallback_reason") is not None:
-            result["fallback_reason"] = state["fallback_reason"]
-        if state.get("plan_provenance") is not None:
-            result["plan_provenance"] = state["plan_provenance"]
-        return result
-
-    async def _validator_node(self, state: PlanningState) -> dict[str, object]:
-        attempt = state.get("validation_attempt", 0) + 1
-        validation = await self._nodes.run(
-            state["run_id"],
-            "rule_validator",
-            lambda: self._validate_with_trace(
-                state["candidate_plan"],
-                state["planning_context"],
-                state["candidate_evidence_visibility"],
-                attempt,
-            ),
-            attempt=attempt,
-        )
-        return {
-            "validation_report": validation,
-            "validation_attempt": attempt,
-        }
-
-    async def _revise_node(self, state: PlanningState) -> dict[str, object]:
-        candidate, fallback_reason, visibility = await self._nodes.run(
-            state["run_id"],
-            "revise_or_fallback",
-            lambda: self._revise_or_fallback(state),
-            attempt=state.get("repair_count", 0) + 1,
-        )
-        return {
-            "candidate_plan": candidate,
-            "candidate_evidence_visibility": visibility,
-            "fallback_reason": fallback_reason,
-            "repair_count": state.get("repair_count", 0) + 1,
-            "plan_provenance": state.get("plan_provenance"),
-            "unknown_rule_codes": state.get("unknown_rule_codes", []),
-            "violation_category": state.get("violation_category"),
-        }
-
-    async def _companion_node(self, state: PlanningState) -> dict[str, object]:
-        companion = await self._nodes.run(
-            state["run_id"],
-            "companion_response",
-            lambda: self._immediate(
-                build_companion(state["candidate_plan"]),
-                {"template_version": "plan_ready_v1"},
-            ),
-        )
-        return {"companion": companion}
-
-    async def _persist_node(self, state: PlanningState) -> dict[str, object]:
-        run_id = state["run_id"]
-        provenance = self._derive_provenance(state)
-        AGENT_REPAIR_PATH.inc(make_labels(path=provenance))
-        # Durable attribution event: the eval attribution report joins this
-        # against trial outcomes to split model vs engineering contribution.
-        async with self._session_factory() as session:
-            async with session_transaction(session):
-                await EventRecorder(session).record(
-                    run_id,
-                    "run.provenance",
-                    {
-                        "plan_provenance": provenance,
-                        "repair_count": state.get("repair_count", 0),
-                        "validation_attempt": state.get("validation_attempt", 0),
-                        "fallback_reason": state.get("fallback_reason"),
-                        "unknown_rule_codes": state.get("unknown_rule_codes", []),
-                        "violation_category": state.get("violation_category"),
-                    },
-                )
-        persist_step = await self._nodes.start_step(run_id, "persist")
-        await self._finalizer.finalize_plan(
-            run_id=run_id,
-            user_id=state["user_id"],
-            candidate=state["candidate_plan"],
-            evidence_visibility=state["candidate_evidence_visibility"],
-            companion=state["companion"],
-            persist_step_id=persist_step.id,
-            fallback_reason=state.get("fallback_reason"),
-            simulate_failure="[mock:persist-failure]" in state["request"].message,
-        )
-        return {}
-
-    @staticmethod
-    def _after_risk(state: PlanningState) -> str:
-        return "high" if state["risk"].level == "high" else "safe"
-
-    @staticmethod
-    def _after_intent(state: PlanningState) -> str:
-        intent = state["intent"]
-        if intent.intent == RunIntent.NAVIGATE:
-            return "navigation"
-        if intent.intent == RunIntent.UNSUPPORTED or intent.missing_slots:
-            return "clarification"
-        return "ready"
-
-    @staticmethod
-    def _route_after_intent(state: PlanningState) -> str | list[str]:
-        """Routing function for the conditional edge: returns node names
-        (a list means fan-out — every listed node runs concurrently)."""
-        branch = FixedPlanningGraph._after_intent(state)
-        if branch == "ready":
-            config = state.get("runtime_config")
-            if config is not None and not config.context_fanout_enabled:
-                # Serial A/B mode: only the evidence branch runs; it loads
-                # memory inline inside its own lock section.
-                return ["evidence_loader"]
-            return ["memory_loader", "evidence_loader"]
-        return branch
-
-    @staticmethod
-    def _after_validation(state: PlanningState) -> str:
-        if state["validation_report"].passed or state.get("fallback_reason") is not None:
-            return "passed"
-        return "repair"
 
     @staticmethod
     def _plan_context(plan: Plan) -> PlanContext:

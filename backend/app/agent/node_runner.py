@@ -2,10 +2,10 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager as AsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from contextlib import nullcontext
 from time import monotonic
 from typing import TypeVar
 from uuid import UUID
@@ -129,7 +129,7 @@ class NodeRunner:
         node_name: str,
         operation: Callable[[], Awaitable[NodeOutput[T]]],
         *,
-        lock: asyncio.Lock,
+        lock: "AsyncContextManager[None]",
         attempt: int = 1,
     ) -> T:
         """Run a parallel-superstep node with ALL session work — step

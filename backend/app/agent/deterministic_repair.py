@@ -21,9 +21,7 @@ import logging
 from app.schemas.agent_runs import (
     PlanCandidate,
     PlanningContext,
-    TaskCandidate,
 )
-from app.schemas.enums import TaskStatus
 
 logger = logging.getLogger(__name__)
 

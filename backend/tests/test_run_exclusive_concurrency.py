@@ -19,11 +19,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.agent.node_runner import NodeRunner
+from app.agent.node_runner import NodeOutput, NodeRunner, NodeTelemetry
 from app.core.config import get_settings
 from app.harness.budget import BudgetGuard, CancellationToken
 from app.harness.snapshots import SnapshotService
-from app.agent.node_runner import NodeOutput, NodeTelemetry
 
 
 def _node_runner() -> tuple[NodeRunner, object]:
@@ -103,17 +102,19 @@ async def test_four_concurrent_runs_on_pooled_factory() -> None:
     through the SAME pooled factory (committed) because the standard
     single-connection test fixture is invisible to pooled sessions; the
     created rows are cleaned up in the finally block."""
+    from datetime import timedelta
+
+    from sqlalchemy import delete
+
     from app.agent.executor import AgentRunExecutor
+    from app.core.security import TokenService
+    from app.core.time import product_today
+    from app.models.agent_run import AgentEvent, AgentRun, AgentStep
+    from app.schemas.enums import CareerStage, GoalType, SkillLevel
+    from app.schemas.profile import ProfilePutRequest
     from app.services.agent_runs import AgentRunService
     from app.services.auth import AuthService
     from app.services.profiles import ProfileService
-    from app.schemas.profile import ProfilePutRequest
-    from app.schemas.enums import CareerStage, GoalType, SkillLevel
-    from app.core.time import product_today
-    from datetime import timedelta
-    from app.core.security import TokenService
-    from sqlalchemy import delete
-    from app.models.agent_run import AgentRun, AgentEvent, AgentStep
 
     settings = get_settings()
     engine = create_async_engine(settings.database_url)

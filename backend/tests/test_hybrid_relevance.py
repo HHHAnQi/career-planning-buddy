@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import uuid4
 
-from app.agent.context_compression import _task_relevance, _select_retained_tasks
+from app.agent.context_compression import _select_retained_tasks, _task_relevance
 from app.schemas.agent_runs import TaskContext, TaskStatus
 
 

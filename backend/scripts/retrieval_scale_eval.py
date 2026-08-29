@@ -144,7 +144,9 @@ async def _provision(
             return user.id
 
 
-async def run_size(factory, size: int, embedding: EmbeddingProvider, reranker: RerankProvider) -> dict[str, object]:
+async def run_size(
+    factory, size: int, embedding: EmbeddingProvider, reranker: RerankProvider
+) -> dict[str, object]:
     rng = random.Random(42 + size)
     docs, queries = _gen_corpus(rng, size)
     started = time.monotonic()
@@ -155,7 +157,12 @@ async def run_size(factory, size: int, embedding: EmbeddingProvider, reranker: R
         async with session_transaction(session):
             repo = RagDocumentRepository(session)
             all_rows = await repo.hybrid_search(
-                user_id=user_id, query_text="项目", query_vector=None, limit=5000, channel_k=5000, mode="lexical",
+                user_id=user_id,
+                query_text="项目",
+                query_vector=None,
+                limit=5000,
+                channel_k=5000,
+                mode="lexical",
             )
             total_chunks = len(all_rows)
             # Golden sets come from the full corpus (by construction), never
@@ -168,8 +175,17 @@ async def run_size(factory, size: int, embedding: EmbeddingProvider, reranker: R
             ]
             queries = valid_queries
 
-            results: dict[str, object] = {"corpus_chunks": total_chunks, "queries": len(queries), "provision_s": round(provision_s, 1)}
-            for mode, channel_k in (("vector", 200), ("lexical", 200), ("hybrid20", 20), ("hybrid200", 200)):
+            results: dict[str, object] = {
+                "corpus_chunks": total_chunks,
+                "queries": len(queries),
+                "provision_s": round(provision_s, 1),
+            }
+            for mode, channel_k in (
+                ("vector", 200),
+                ("lexical", 200),
+                ("hybrid20", 20),
+                ("hybrid200", 200),
+            ):
                 hits: list[tuple[list[UUID], str]] = []
                 q_start = time.monotonic()
                 for query, marker in queries:
@@ -189,7 +205,9 @@ async def run_size(factory, size: int, embedding: EmbeddingProvider, reranker: R
                 elapsed = time.monotonic() - q_start
                 pairs = [(ranked, set(g)) for ranked, g in hits]
                 results[mode] = {
-                    "recall_at_5": round(sum(recall_at_k(r, g, 5) for r, g in pairs) / len(pairs), 3),
+                    "recall_at_5": round(
+                        sum(recall_at_k(r, g, 5) for r, g in pairs) / len(pairs), 3
+                    ),
                     "mrr": round(sum(mrr(r, g) for r, g in pairs) / len(pairs), 3),
                     "query_ms": round(elapsed * 1000 / len(queries)),
                 }
@@ -216,7 +234,9 @@ async def run_size(factory, size: int, embedding: EmbeddingProvider, reranker: R
                     pairs.append((ranked, golden_ids))
                 elapsed = time.monotonic() - q_start
                 results[f"hybrid+rerank{topn}"] = {
-                    "recall_at_5": round(sum(recall_at_k(r, g, 5) for r, g in pairs) / len(pairs), 3),
+                    "recall_at_5": round(
+                        sum(recall_at_k(r, g, 5) for r, g in pairs) / len(pairs), 3
+                    ),
                     "mrr": round(sum(mrr(r, g) for r, g in pairs) / len(pairs), 3),
                     "query_ms": round(elapsed * 1000 / len(queries)),
                 }

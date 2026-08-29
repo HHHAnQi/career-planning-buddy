@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent.executor import AgentRunExecutor
 from app.core.config import get_settings
-from app.core.database import session_transaction
 from app.core.security import TokenService
 from app.core.time import product_today
 from app.models.agent_run import AgentRun, AgentStep
@@ -65,10 +64,10 @@ async def _stats(
         }
 
 
-async def _wait_for_planning_step(factory, run_id, timeout: float = 30.0) -> None:
+async def _wait_for_planning_step(factory, run_id, wait_seconds: float = 30.0) -> None:
     import time
 
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         async with factory() as session:
             done = await session.scalar(

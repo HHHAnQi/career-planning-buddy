@@ -125,7 +125,7 @@ async def run(k: int, dataset: str = DEFAULT_DATASET) -> dict[str, object]:
                 for mode in MODES + ("hybrid_rerank",):
                     repository = RagDocumentRepository(session)
                     positive_cases = []
-                    negative_cases = []
+                    _ = []  # placeholder-free: legacy branch kept for symmetry
                     gate_outcomes = []  # (expected_sufficient, actual_sufficient)
                     mode_latencies = []
                     for case in cases:
@@ -143,7 +143,7 @@ async def run(k: int, dataset: str = DEFAULT_DATASET) -> dict[str, object]:
                                 )
                                 gate_outcomes.append((False, outcome.sufficient))
                             else:
-                                gate_outcomes.append((False, False))  # non-rerank modes have no gate
+                                gate_outcomes.append((False, False))  # non-rerank modes have no gat  # noqa: E501
                             continue
 
                         relevant = {

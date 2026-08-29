@@ -26,7 +26,9 @@ THRESHOLD = 0.10
 
 def _bigrams(text: str) -> set[str]:
     normalized = "".join(text.split()).lower()
-    return {normalized[i : i + 2] for i in range(len(normalized) - 1)} if len(normalized) >= 2 else set()
+    if len(normalized) < 2:
+        return set()
+    return {normalized[i : i + 2] for i in range(len(normalized) - 1)}
 
 
 async def build_report(experiment_id: str) -> dict[str, object]:
@@ -94,7 +96,6 @@ async def build_report(experiment_id: str) -> dict[str, object]:
                 ) + " " + " ".join(
                     f"{t.title} {t.deliverable}" for t in tasks
                 )
-                import re as _re
 
                 from evals.v2.graders.model import _distinctive_anchors
 

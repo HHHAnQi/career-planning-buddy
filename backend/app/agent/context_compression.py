@@ -65,12 +65,12 @@ def _task_relevance(
     score degrades to the lexical half only (deterministic fallback)."""
 
     def _cosine(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b, strict=False))
-        na = sum(x * x for x in a) ** 0.5
-        nb = sum(x * x for x in b) ** 0.5
+        dot = float(sum(x * y for x, y in zip(a, b, strict=False)))
+        na = float(sum(x * x for x in a) ** 0.5)
+        nb = float(sum(x * x for x in b) ** 0.5)
         if na == 0 or nb == 0:
             return 0.0
-        return max(0.0, dot / (na * nb))
+        return float(max(0.0, dot / (na * nb)))
 
     surface = " ".join(
         part
