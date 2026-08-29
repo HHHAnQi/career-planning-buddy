@@ -15,6 +15,10 @@ downloads/
 eggs/
 .eggs/
 lib/
+# Keep the React application's source helpers; the generic Python template rule above
+# otherwise hides new TypeScript files under frontend/src/lib.
+!frontend/src/lib/
+!frontend/src/lib/*.ts
 lib64/
 parts/
 sdist/
@@ -149,6 +153,9 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
+!**/.env.example
 .envrc
 .venv
 env/
@@ -216,3 +223,43 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Node.js and frontend tooling
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.vite/
+test-results/
+pytest-cache-files-*/
+**/.pytest-tmp-*/
+backend/evals/artifacts/*.json
+backend/evals/bad_cases/*.jsonl
+
+# Local toolchains and temporary test output
+.python/
+.tools/
+.tmp/
+tmp/
+.run/
+
+# Local credentials and private deployment material
+*.pem
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+output/
+
+# Rubric annotation working files (CSV) — golden labels live in the JSONL
+backend/evals/annotations/*.csv

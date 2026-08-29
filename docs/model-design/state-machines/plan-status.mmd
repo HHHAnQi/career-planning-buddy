@@ -1,0 +1,16 @@
+# Plan 状态机
+
+一个 Plan 是某个 planning_date 的行动批次，同时携带中期方向和 weekly_focus。
+
+```mermaid
+stateDiagram-v2
+    [*] --> generated: persist new plan version
+    generated --> active: first task starts
+    generated --> archived: next plan replaces / user archives
+    active --> completed: all planning_date tasks completed
+    active --> archived: successful continue/adjust replaces it
+    completed --> archived: next-day plan transaction commits / user archives
+    archived --> [*]
+```
+
+`adopted_at` 在 generated→active 时写入，不再把 adopted 设计成独立状态。completed 表示当前行动批次完成，不等于整个求职目标完成；它仍可作为次日 continue/adjust 的来源。

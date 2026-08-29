@@ -1,0 +1,14 @@
+[
+  {"id":"question-resume-01","operation":"question","expect":"resume_source"},
+  {"id":"question-jd-01","operation":"question","expect":"job_target_source"},
+  {"id":"question-no-invention-01","operation":"question","expect":"excerpt_visible"},
+  {"id":"answer-short-followup-01","operation":"answer","expect":"answer_grounded_followup"},
+  {"id":"answer-long-next-01","operation":"answer","expect":"bounded_next"},
+  {"id":"answer-insufficient-01","operation":"answer","expect":"insufficient_evidence"},
+  {"id":"answer-no-false-error-01","operation":"answer","expect":"no_unsupported_high_error"},
+  {"id":"followup-limit-01","operation":"answer","expect":"no_followup_over_budget"},
+  {"id":"followup-depth-01","operation":"answer","expect":"no_followup_of_followup"},
+  {"id":"report-evidence-01","operation":"report","expect":"weakness_has_turn"},
+  {"id":"report-action-01","operation":"report","expect":"action_maps_weakness"},
+  {"id":"report-no-long-memory-01","operation":"report","expect":"observed_only"}
+]

@@ -1,0 +1,39 @@
+{
+  "failing_trial_count": 10,
+  "by_trial": {
+    "live-mem-01#1": [
+      "tool.expected_match"
+    ],
+    "live-mem-01#2": [
+      "tool.expected_match"
+    ],
+    "repair-02#0": [
+      "task.allowed_run_status"
+    ],
+    "repair-02#1": [
+      "task.allowed_run_status"
+    ],
+    "repair-02#2": [
+      "task.allowed_run_status"
+    ],
+    "repair-04#0": [
+      "task.allowed_run_status"
+    ],
+    "repair-04#1": [
+      "task.allowed_run_status"
+    ],
+    "repair-04#2": [
+      "task.allowed_run_status"
+    ],
+    "replan-01#1": [
+      "task.allowed_run_status"
+    ],
+    "replan-05#2": [
+      "task.allowed_run_status"
+    ]
+  },
+  "grader_histogram": {
+    "task.allowed_run_status": 8,
+    "tool.expected_match": 2
+  }
+}
