@@ -1,0 +1,14 @@
+{
+  "id": "cd3eb74e-0448-49a2-bc04-2758a9318990",
+  "dataset_id": "stage5",
+  "dataset_version": "v1",
+  "execution_mode": "live_provider",
+  "agent_variant": null,
+  "graph_version": "stage5-v1",
+  "prompt_version": "openai_compatible_plan_stage6_week_schedule_v5",
+  "model_version": "glm-4.7",
+  "trial_count": 3,
+  "status": "completed",
+  "created_at": "2026-08-26T15:55:09.660646+00:00",
+  "finished_at": "2026-08-26T16:21:47.655422+00:00"
+}

@@ -9,6 +9,56 @@ Career Planning Buddy is an evidence-grounded career coaching Agent for CS stude
 
 项目重点不在让模型自由发挥，而在于如何用受控工作流、状态机、快照、人工确认和离线评测，把 LLM 能力放进可验证的软件系统。
 
+## 30 秒读懂（写给 Agent Engineer / Agent Infra 面试官）
+
+**1. 这是个什么 Agent？** 证据化求职教练 Agent：LangGraph 13 节点受控状态机
+（原生 fan-out/join 并行 + 有界修复环），把求职上下文变成可执行、可校验、
+可复盘的 7 天行动计划。
+
+**2. 为什么不是普通 LangGraph Demo？** 四个工程面：
+- **Durable Agent Runtime**：PostgreSQL lease/heartbeat/attempt-fencing，
+  关键模型节点 durable checkpoint（崩溃恢复实测 **0 次重复 provider 调用**），
+  BudgetGuard 四重硬限（调用/token/deadline/取消）+ 节点独立超时；
+- **Tool Governance**：schema 校验注册表、allowlist、轮次/次数/超时预算、
+  显式错误分类，评测臂不变量断言（配错实验臂在机器层面被判无效）；
+- **Context / Memory Engineering**：三级压缩（混合语义召回→动态 token
+  预算→摘要折叠）、双层记忆（Run/Personal）带消融开关与成本账本；
+- **Eval Harness**：八级类型化评测数据模型、六域确定性 grader、双维度
+  归因（model_pass/工程兜底逐 trial 拆分）、预注册指标制度 + Wilson CI。
+
+**3. 实际 Eval 结果？**（详见下文与 [`backend/evals/releases/`](backend/evals/releases/)）
+- 硬门禁 **72.2%（初始基线）→ 88.9%**（当前验证，k=3，Wilson 95%CI [80.7, 93.9]）
+- 延迟 P95 **45.5s → 28.6s**；814 项后端测试 + 36 项前端测试全绿
+- 混合检索（pgvector+pg_trgm RRF + GPU rerank）Recall@5 = 1.0
+
+**4. 系统的明确 limitation？**（完整清单见文末）单 worker 部署未做 HA 验证；
+关键节点 checkpoint ≠ 全图 exactly-once；记忆层对硬门禁的贡献经 k=3 复跑
+不显著（+4.3pp, p=0.429，可证价值为接地能力与零边际成本）；无大规模真实
+用户流量验证。
+
+## 可观测性（数据即真相）
+
+每次 Run 的执行痕迹全部持久化，可逐层下钻定位失败根因：
+
+```text
+AgentRun ── status / result_kind / tokens / cost / latency / fallback_reason
+ ├── AgentStep（每节点）── status / latency / trace_data / error_code
+ │     ├── provider call（planning / repair，含 prompt 版本与 usage）
+ │     ├── tool calls（schema、参数、延迟、错误分类）
+ │     ├── checkpoint（输入指纹 → 恢复时跳过昂贵调用）
+ │     └── provenance（model_pass | format_repair | deterministic_repair
+ │                     | llm_repair | fallback —— 归因报告的数据源）
+ ├── AgentEvent（原子递增序号，SSE 断线续传的锚点）
+ └── RunInputSnapshot（冻结的规划上下文，评测与审计的输入凭证）
+```
+
+## 真实运行证据（非截图，可复算）
+
+界面截图位保留在下方（待补脱敏图）。当前公开证据以**可复算的评测工件**
+形式提供：[`backend/evals/releases/v0.3-hardgate-88.9/`](backend/evals/releases/v0.3-hardgate-88.9/)
+——90 trial 匿名记录、全量 grader 行、失败分解、SHA256 校验和，一条命令
+重新生成并与 summary 逐行对账。
+
 ## 项目解决什么问题
 
 计算机学生准备求职时，常见问题不是缺少建议，而是信息无法形成连续行动：
