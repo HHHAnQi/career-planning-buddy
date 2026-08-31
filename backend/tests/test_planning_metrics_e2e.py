@@ -232,7 +232,7 @@ async def test_e2e_mixed_batch(db_connection, db_session) -> None:
     # No missing runs
     assert s["missing_runs"] == []
     # Per-trial cost details present
-    assert len(s["cost"]["per_trial_details"]) == 4
+    assert len(s["cost"]["per_trial"]) == 4
     # Outcome split sums correctly
     split = s["outcome_split"]
     total_outcomes = (

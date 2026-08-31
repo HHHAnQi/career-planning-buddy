@@ -497,6 +497,11 @@ class PlanningState(TypedDict, total=False):
     # attribution: "model_pass" | "format_repair" | "deterministic_repair"
     # | "llm_repair" | "fallback".
     plan_provenance: str
+    # Stage-by-stage repair history for planning metrics: each entry is
+    # {"stage": "format_repair"|"deterministic_repair"|"llm_repair",
+    #  "action": "attempted"|"succeeded"|"failed"|"skipped_disabled"|"skipped_budget"}
+    # Multiple stages may occur in one run; they do NOT overwrite each other.
+    repair_stages: list[dict[str, str]]
     # Rule codes that deterministic repair cannot handle; persisted for the
     # offline rule-iteration loop (unknown-rule backlog).
     unknown_rule_codes: list[str]

@@ -1,13 +1,17 @@
 """Planning quality & cost metrics from persisted run events (frozen v1).
 
-Reads agent_events (run.provenance) and agent_runs for a set of trial
-run_ids, and computes the pre-registered metrics from
-docs/standards/metric-registry.md (Planning v1). Pure offline — no model
-calls.
+Reads agent_events (run.provenance, including repair_stages) and
+agent_runs. Computes the pre-registered metrics from
+docs/standards/metric-registry.md (Planning v1).
 
-Chain: real executor run -> persisted events/steps/runs -> collect() ->
-PlanningMetrics.summary(). This module is the READ side only; write side
-is the graph's persist node.
+Stage-level evidence: the graph records repair_stages in the
+run.provenance event payload. Each entry is
+{"stage": ..., "action": "attempted"|"succeeded"|"failed"|"skipped_disabled"|"skipped_budget"}.
+The collector reads these DIRECTLY — never infers from fallback_reason
+keywords or final provenance alone.
+
+Cost accumulation is INDEPENDENT of outcome classification: failed runs
+keep their tokens; unknown usage stays unknown.
 """
 
 from __future__ import annotations
@@ -20,9 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import get_settings
 
-# Column names verified against information_schema:
-#   agent_steps has created_at (NOT started_at), finished_at
-#   agent_events.payload_json is JSONB containing plan_provenance as string
 QUERY = text(
     """
     SELECT r.id AS run_id,
@@ -32,18 +33,17 @@ QUERY = text(
            r.total_tokens_in,
            r.total_tokens_out,
            r.total_latency_ms,
-           (SELECT e.payload_json ->> 'plan_provenance'
+           (SELECT e.payload_json
               FROM agent_events e
              WHERE e.run_id = r.id AND e.event_type = 'run.provenance'
-             ORDER BY e.sequence DESC LIMIT 1) AS provenance,
+             ORDER BY e.sequence DESC LIMIT 1) AS provenance_payload,
            (SELECT json_agg(json_build_object(
                     'node', s.node_name,
                     'status', s.status,
                     'error_code', s.error_code,
                     'trace', s.trace_data,
                     'tokens_in', s.tokens_in,
-                    'tokens_out', s.tokens_out,
-                    'cost_cny', s.cost_cny
+                    'tokens_out', s.tokens_out
                 ) ORDER BY s.created_at, s.sequence)
               FROM agent_steps s WHERE s.run_id = r.id) AS steps
     FROM agent_runs r
@@ -53,18 +53,21 @@ QUERY = text(
 
 NON_PLAN_TERMINALS = {"clarification", "safe_response", "navigation"}
 
+# Stage names in repair_stages payloads
+STAGE_FORMAT = "format_repair"
+STAGE_DETERMINISTIC = "deterministic_repair"
+STAGE_LLM = "llm_repair"
+
 
 @dataclass
 class TrialRecord:
-    """One trial as read back from the database."""
-
     run_id: str
     status: str
     result_kind: str | None
     fallback_reason: str | None
     provenance: str | None
-    repair_steps: list[dict[str, Any]]
-    planning_steps: list[dict[str, Any]]
+    repair_stages: list[dict[str, str]]
+    all_steps: list[dict[str, Any]]
     tokens_in: int | None
     tokens_out: int | None
     latency_ms: int
@@ -72,22 +75,33 @@ class TrialRecord:
 
 @dataclass
 class PlanningMetrics:
+    # Denominators
     should_plan_total: int = 0
+    format_repair_entered: int = 0
+    deterministic_repair_entered: int = 0
+    llm_repair_entered: int = 0
+    llm_repair_skipped: int = 0
+
+    # Numerators
     first_pass_compliant: int = 0
+    format_repair_succeeded: int = 0
+    deterministic_repair_succeeded: int = 0
+    llm_repair_succeeded: int = 0
     final_compliant: int = 0
+
+    # Outcome split (for reporting, some may overlap)
     no_plan: int = 0
     degraded_plan: int = 0
     run_failed: int = 0
     non_plan_terminal: int = 0
-    format_repair_entered: int = 0
-    format_repair_succeeded: int = 0
-    deterministic_repair_entered: int = 0
-    deterministic_repair_succeeded: int = 0
-    llm_repair_entered: int = 0
-    llm_repair_succeeded: int = 0
-    total_tokens_in: int | None = 0
-    total_tokens_out: int | None = 0
+
+    # Cost (independent of outcome)
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
     unknown_usage_trials: int = 0
+    planning_tokens: int = 0
+    repair_tokens: int = 0
+
     trials: list[TrialRecord] = field(default_factory=list)
     missing_runs: list[str] = field(default_factory=list)
 
@@ -117,6 +131,7 @@ class PlanningMetrics:
                 "format_repair_entered": self.format_repair_entered,
                 "deterministic_repair_entered": self.deterministic_repair_entered,
                 "llm_repair_entered": self.llm_repair_entered,
+                "llm_repair_skipped": self.llm_repair_skipped,
             },
             "outcome_split": {
                 "first_pass_compliant": self.first_pass_compliant,
@@ -129,8 +144,14 @@ class PlanningMetrics:
             "cost": {
                 "total_tokens_in": self.total_tokens_in,
                 "total_tokens_out": self.total_tokens_out,
+                "planning_tokens": self.planning_tokens,
+                "repair_tokens": self.repair_tokens,
                 "unknown_usage_trials": self.unknown_usage_trials,
-                "per_trial_details": [
+                "consistency_check": (
+                    self.planning_tokens + self.repair_tokens
+                    == self.total_tokens_in
+                ),
+                "per_trial": [
                     {
                         "run_id": t.run_id,
                         "tokens_in": t.tokens_in,
@@ -144,43 +165,29 @@ class PlanningMetrics:
         }
 
 
-def _extract_repair_entry(record: TrialRecord) -> dict[str, bool]:
-    """Determine which repair types were ENTERED from step evidence.
+def _has_stage(stages: list[dict[str, str]], stage: str, action: str) -> bool:
+    return any(s.get("stage") == stage and s.get("action") == action for s in stages)
 
-    The revise_or_fallback node is the single repair funnel; which type
-    was attempted is distinguishable from step trace data:
-      - trace has 'plan_provenance' == 'format_repair' etc.
-      - or the node produced a fallback_reason indicating which type ran
-    """
-    entered = {"format": False, "deterministic": False, "llm": False}
-    for step in record.repair_steps:
-        trace = step.get("trace") or {}
-        prov = trace.get("plan_provenance") or record.provenance
-        fb = record.fallback_reason or ""
-        if prov == "format_repair" or "format" in fb:
-            entered["format"] = True
-        if prov == "llm_repair" or "llm" in fb or "business" in fb:
-            entered["llm"] = True
-    # The deterministic repair is ALWAYS the first attempt in the funnel
-    # (it runs before the LLM branch in _revise_or_fallback); if the
-    # revise node executed at all, deterministic was entered.
-    if record.repair_steps:
-        entered["deterministic"] = True
-    return entered
+
+def _entered_stage(stages: list[dict[str, str]], stage: str) -> bool:
+    """A stage was ENTERED when an 'attempted' record exists."""
+    return _has_stage(stages, stage, "attempted")
 
 
 def _classify(record: TrialRecord, metrics: PlanningMetrics) -> None:
     provenance = record.provenance
+    stages = record.repair_stages
 
-    # Non-plan terminals: reported separately, never in plan denominators.
+    # Non-plan terminals: excluded from plan denominators
     if record.result_kind in NON_PLAN_TERMINALS:
         metrics.non_plan_terminal += 1
+        _accumulate_cost(record, metrics)
         return
 
     metrics.should_plan_total += 1
     metrics.trials.append(record)
 
-    # --- Outcome classification ---
+    # === Outcome classification (independent of repair stages) ===
     if provenance == "model_pass":
         metrics.first_pass_compliant += 1
 
@@ -188,53 +195,57 @@ def _classify(record: TrialRecord, metrics: PlanningMetrics) -> None:
         metrics.run_failed += 1
         if record.result_kind is None:
             metrics.no_plan += 1
-        # Failed runs still count repair entries if the funnel ran.
-        entry = _extract_repair_entry(record)
-        if entry["format"]:
-            metrics.format_repair_entered += 1
-        if entry["deterministic"]:
-            metrics.deterministic_repair_entered += 1
-        if entry["llm"]:
-            metrics.llm_repair_entered += 1
-        return
-
-    if record.status == "degraded":
+    elif record.status == "degraded":
         metrics.degraded_plan += 1
 
-    # Final compliance: a delivered plan that is NOT a fallback template.
+    # Final compliance: delivered plan that is NOT a fallback template
     if record.result_kind == "plan" and provenance not in {"fallback", None}:
         metrics.final_compliant += 1
 
-    # --- Repair funnel entered/succeeded ---
-    # Entered: the funnel ran (any repair step) or provenance indicates it.
-    # Succeeded: the trial's provenance is exactly that repair type AND
-    # the final output is rule-compliant (not a fallback template).
-    entry = _extract_repair_entry(record)
-    is_compliant = (
-        record.result_kind == "plan" and provenance not in {"fallback", None}
-    )
-
-    if provenance == "format_repair" or entry["format"]:
+    # === Repair funnel (from repair_stages, NOT keyword inference) ===
+    # Format repair
+    if _entered_stage(stages, STAGE_FORMAT):
         metrics.format_repair_entered += 1
-        if provenance == "format_repair" and is_compliant:
+        if _has_stage(stages, STAGE_FORMAT, "succeeded"):
             metrics.format_repair_succeeded += 1
-    if provenance == "deterministic_repair" or entry["deterministic"]:
-        metrics.deterministic_repair_entered += 1
-        if provenance == "deterministic_repair" and is_compliant:
-            metrics.deterministic_repair_succeeded += 1
-    if provenance == "llm_repair" or entry["llm"]:
-        metrics.llm_repair_entered += 1
-        if provenance == "llm_repair" and is_compliant:
-            metrics.llm_repair_succeeded += 1
 
-    # --- Cost ---
+    # Deterministic repair
+    if _entered_stage(stages, STAGE_DETERMINISTIC):
+        metrics.deterministic_repair_entered += 1
+        if _has_stage(stages, STAGE_DETERMINISTIC, "succeeded"):
+            metrics.deterministic_repair_succeeded += 1
+
+    # LLM repair: entered ONLY when 'attempted' (not skipped)
+    if _entered_stage(stages, STAGE_LLM):
+        metrics.llm_repair_entered += 1
+        if _has_stage(stages, STAGE_LLM, "succeeded"):
+            metrics.llm_repair_succeeded += 1
+    elif _has_stage(stages, STAGE_LLM, "skipped_disabled") or _has_stage(
+        stages, STAGE_LLM, "skipped_budget"
+    ):
+        metrics.llm_repair_skipped += 1
+
+    # === Cost (always, independent of outcome) ===
+    _accumulate_cost(record, metrics)
+
+
+def _accumulate_cost(record: TrialRecord, metrics: PlanningMetrics) -> None:
+    """Cost accumulation runs for EVERY trial, including failures."""
     if record.tokens_in is None:
         metrics.unknown_usage_trials += 1
-    else:
-        tin = metrics.total_tokens_in or 0
-        tout = metrics.total_tokens_out or 0
-        metrics.total_tokens_in = tin + record.tokens_in
-        metrics.total_tokens_out = tout + record.tokens_out
+        return
+    metrics.total_tokens_in += record.tokens_in
+    tout = record.tokens_out or 0
+    metrics.total_tokens_out += tout
+
+    # Split planning vs repair from step-level tokens
+    for step in record.all_steps:
+        node = step.get("node", "")
+        step_tin = step.get("tokens_in") or 0
+        if node == "career_planning_agent":
+            metrics.planning_tokens += step_tin
+        elif node == "revise_or_fallback":
+            metrics.repair_tokens += step_tin
 
 
 async def collect(
@@ -243,14 +254,7 @@ async def collect(
     database_url: str | None = None,
     session_factory: Any | None = None,
 ) -> PlanningMetrics:
-    """Read persisted runs and compute planning metrics.
-
-    Args:
-        run_ids: UUID strings of the runs to collect.
-        database_url: optional override (defaults to settings).
-        session_factory: optional pre-built async_sessionmaker for
-            reading within a specific transaction context (tests).
-    """
+    """Read persisted runs and compute planning metrics."""
     owns_engine = session_factory is None
     if session_factory is None:
         url = database_url or get_settings().database_url
@@ -260,7 +264,6 @@ async def collect(
         )
     metrics = PlanningMetrics()
     try:
-        # Normalize to UUID list for the IN clause
         uuid_list = [str(rid) for rid in run_ids]
         async with session_factory() as session:
             rows = (
@@ -276,21 +279,22 @@ async def collect(
                 metrics.run_failed += 1
                 continue
 
+            # Extract provenance string and repair_stages from payload
+            payload = row.provenance_payload or {}
+            provenance = payload.get("plan_provenance")
+            repair_stages = payload.get("repair_stages") or []
+            if not isinstance(repair_stages, list):
+                repair_stages = []
+
             steps = row.steps or []
-            repair_steps = [
-                s for s in steps if s.get("node") == "revise_or_fallback"
-            ]
-            planning_steps = [
-                s for s in steps if s.get("node") == "career_planning_agent"
-            ]
             record = TrialRecord(
                 run_id=rid,
                 status=row.status,
                 result_kind=row.result_kind,
                 fallback_reason=row.fallback_reason,
-                provenance=row.provenance,
-                repair_steps=repair_steps,
-                planning_steps=planning_steps,
+                provenance=provenance,
+                repair_stages=repair_stages,
+                all_steps=steps,
                 tokens_in=row.total_tokens_in,
                 tokens_out=row.total_tokens_out,
                 latency_ms=row.total_latency_ms,

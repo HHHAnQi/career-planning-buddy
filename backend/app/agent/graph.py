@@ -586,6 +586,8 @@ class FixedPlanningGraph:
             result["fallback_reason"] = state["fallback_reason"]
         if state.get("plan_provenance") is not None:
             result["plan_provenance"] = state["plan_provenance"]
+        if state.get("repair_stages") is not None:
+            result["repair_stages"] = state["repair_stages"]
         return result
 
     async def _validator_node(self, state: PlanningState) -> dict[str, object]:
@@ -621,6 +623,7 @@ class FixedPlanningGraph:
             "plan_provenance": state.get("plan_provenance"),
             "unknown_rule_codes": state.get("unknown_rule_codes", []),
             "violation_category": state.get("violation_category"),
+            "repair_stages": state.get("repair_stages", []),
         }
 
     async def _companion_node(self, state: PlanningState) -> dict[str, object]:
@@ -652,6 +655,7 @@ class FixedPlanningGraph:
                         "fallback_reason": state.get("fallback_reason"),
                         "unknown_rule_codes": state.get("unknown_rule_codes", []),
                         "violation_category": state.get("violation_category"),
+                        "repair_stages": state.get("repair_stages", []),
                     },
                 )
         persist_step = await self._nodes.start_step(run_id, "persist")
@@ -1127,6 +1131,7 @@ class FixedPlanningGraph:
         tool_call_count = state.get("tool_call_count", 0)
         total_usage: ProviderUsage | None = None
         stream_summaries: list[dict[str, object]] = []
+        state.setdefault("repair_stages", [])
         prompt_version = state["runtime_config"].prompt_versions["career_planning"]
         # Input accounting captured from the provider-returned payload
         # (computed on the ACTUAL request inside the provider).
@@ -1262,6 +1267,9 @@ class FixedPlanningGraph:
                 turn = AgentTurnResponse.model_validate(raw)
             except ValidationError:
                 self._budget.claim_format_repair()
+                state["repair_stages"].append(
+                    {"stage": "format_repair", "action": "attempted"}
+                )
                 repair_catalog, repair_visibility = build_evidence_visibility(
                     call_id=f"{state['run_id']}:format_repair",
                     evidence_catalog=evidence_catalog,
@@ -1282,6 +1290,9 @@ class FixedPlanningGraph:
                 try:
                     response = ProviderPlanResponse.model_validate(repaired)
                 except ValidationError:
+                    state["repair_stages"].append(
+                        {"stage": "format_repair", "action": "failed"}
+                    )
                     state["fallback_reason"] = "format_repair_failed"
                     fallback = fallback_candidate(context, mode)
                     _, fallback_visibility = build_evidence_visibility(
@@ -1300,6 +1311,9 @@ class FixedPlanningGraph:
                     )
                 # Format repair succeeded: the finalized candidate came from
                 # the provider repair call, not the model's first-shot output.
+                state["repair_stages"].append(
+                    {"stage": "format_repair", "action": "succeeded"}
+                )
                 state["plan_provenance"] = "format_repair"
                 return NodeOutput(
                     (
@@ -1425,6 +1439,9 @@ class FixedPlanningGraph:
             for code in unknown_codes:
                 AGENT_UNKNOWN_RULE.inc(make_labels(code=code))
 
+        state.setdefault("repair_stages", []).append(
+            {"stage": "deterministic_repair", "action": "attempted"}
+        )
         deterministically_fixed = deterministic_repair(
             state["candidate_plan"], context, failed_codes
         )
@@ -1469,6 +1486,9 @@ class FixedPlanningGraph:
         if not state["runtime_config"].business_repair_llm_enabled:
             # Sunset criterion fired (see config docs): the LLM repair call
             # is disabled; degrade straight to the deterministic template.
+            state.setdefault("repair_stages", []).append(
+                {"stage": "llm_repair", "action": "skipped_disabled"}
+            )
             fallback = fallback_candidate(context, state["intent"].replan_mode)
             _, visibility = build_evidence_visibility(
                 call_id=f"{state['run_id']}:business_repair_disabled",
@@ -1476,6 +1496,9 @@ class FixedPlanningGraph:
             )
             return NodeOutput((fallback, "business_repair_disabled", visibility))
 
+        state.setdefault("repair_stages", []).append(
+            {"stage": "llm_repair", "action": "attempted"}
+        )
         AGENT_REPAIR_PATH.inc(
             make_labels(path="llm_unknown" if unknown_codes else "llm")
         )
@@ -1492,6 +1515,9 @@ class FixedPlanningGraph:
         try:
             response = ProviderPlanResponse.model_validate(raw)
         except ValidationError:
+            state["repair_stages"].append(
+                {"stage": "llm_repair", "action": "failed"}
+            )
             fallback = fallback_candidate(context, state["intent"].replan_mode)
             _, fallback_visibility = build_evidence_visibility(
                 call_id=f"{state['run_id']}:business_invalid_fallback",
@@ -1505,6 +1531,9 @@ class FixedPlanningGraph:
                     visibility,
                 ),
             )
+        state["repair_stages"].append(
+            {"stage": "llm_repair", "action": "succeeded"}
+        )
         state["plan_provenance"] = "llm_repair"
         if response.violation_category is not None:
             state["violation_category"] = response.violation_category

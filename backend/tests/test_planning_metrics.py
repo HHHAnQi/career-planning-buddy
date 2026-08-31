@@ -26,23 +26,18 @@ def _record(
     status: str = "completed",
     result_kind: str | None = "plan",
     fallback_reason: str | None = None,
-    steps: list[dict] | None = None,
+    stages: list[dict] | None = None,
     tokens: tuple[int, int] | None = (200, 350),
 ) -> TrialRecord:
     tin, tout = tokens if tokens else (None, None)
-    all_steps = steps or []
     return TrialRecord(
         run_id=str(uuid4()),
         status=status,
         result_kind=result_kind,
         fallback_reason=fallback_reason,
         provenance=provenance,
-        repair_steps=[
-            s for s in all_steps if s.get("node") == "revise_or_fallback"
-        ],
-        planning_steps=[
-            s for s in all_steps if s.get("node") == "career_planning_agent"
-        ],
+        repair_stages=stages or [],
+        all_steps=[],
         tokens_in=tin,
         tokens_out=tout,
         latency_ms=5000,
@@ -65,7 +60,12 @@ def test_first_pass_success_counts_numerator_and_denominator() -> None:
 def test_deterministic_repair_success() -> None:
     m = _fresh()
     _classify(
-        _record(provenance="deterministic_repair"), m
+        _record(
+            provenance="deterministic_repair",
+            stages=[{"stage": "deterministic_repair", "action": "attempted"},
+                    {"stage": "deterministic_repair", "action": "succeeded"}],
+        ),
+        m,
     )
     s = m.summary()
     assert s["B2_deterministic_repair_success"] == 1.0
@@ -75,14 +75,28 @@ def test_deterministic_repair_success() -> None:
 
 def test_llm_repair_success() -> None:
     m = _fresh()
-    _classify(_record(provenance="llm_repair"), m)
+    _classify(
+        _record(
+            provenance="llm_repair",
+            stages=[{"stage": "llm_repair", "action": "attempted"},
+                    {"stage": "llm_repair", "action": "succeeded"}],
+        ),
+        m,
+    )
     s = m.summary()
     assert s["B3_llm_repair_success"] == 1.0
 
 
 def test_format_repair_success() -> None:
     m = _fresh()
-    _classify(_record(provenance="format_repair"), m)
+    _classify(
+        _record(
+            provenance="format_repair",
+            stages=[{"stage": "format_repair", "action": "attempted"},
+                    {"stage": "format_repair", "action": "succeeded"}],
+        ),
+        m,
+    )
     s = m.summary()
     assert s["B1_format_repair_success"] == 1.0
 
@@ -96,7 +110,7 @@ def test_degraded_fallback_is_not_llm_repair_success() -> None:
             status="degraded",
             result_kind="plan",
             fallback_reason="business_repair_disabled",
-            steps=[{"node": "revise_or_fallback", "status": "completed"}],
+            stages=[{"stage": "deterministic_repair", "action": "attempted"}],
         ),
         m
     )
