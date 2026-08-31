@@ -120,6 +120,12 @@ class OpenAICompatiblePlanningProvider:
         # schema + context + tools) must fit, else the call is refused
         # BEFORE any provider traffic (explicit status, never silent).
         self._max_input_tokens = max_input_tokens
+        # Per-request accounting at the send boundary (see
+        # _complete_request): estimate, budget, and whether the request
+        # was actually sent. Budget refusals are recorded with sent=False
+        # and never counted as sent calls.
+        self.request_records: list[dict[str, object]] = []
+        self.sent_request_count = 0
         self._owns_client = client is None
         self._client = client or OpenAIChatLLMClient(
             api_key=api_key,
@@ -135,11 +141,51 @@ class OpenAICompatiblePlanningProvider:
     async def _complete_request(self, request: LLMRequest) -> LLMResponse:
         """Complete via SSE streaming when enabled, forwarding text deltas.
 
+        This is the SINGLE send boundary shared by planning, agent tool
+        turns, format repair, and business repair. The pre-call budget
+        gate and the per-request accounting (estimate / budget / sent)
+        live HERE so no path can bypass them; a refused request raises
+        before any provider traffic and is recorded with sent=False.
+
         Streaming preserves the non-streaming contract: the assembled
         ``LLMResponse`` is identical, so graph validation, repair, and the
         eval harness are unaffected. A sink bound by the graph (ContextVar)
         receives each delta; without one, deltas are simply discarded.
         """
+        # Full tool definitions (name + description + input JSON schema)
+        # are part of the actual request and of the estimate.
+        from app.prompts.career_planning import rendered_input_estimate
+
+        estimate = rendered_input_estimate(
+            [m.model_dump() for m in request.messages],
+            tools=[
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_json_schema": t.input_json_schema,
+                }
+                for t in (request.tools or [])
+            ],
+        )
+        limit = self._max_input_tokens
+        record = {
+            "operation": request.operation,
+            "estimate_total_tokens": estimate["estimate_total_tokens"],
+            "budget": limit,
+            "sent": True,
+        }
+        self.request_records.append(record)
+        self.sent_request_count += 1
+        if limit is not None and estimate["estimate_total_tokens"] > limit:
+            record["sent"] = False
+            self.sent_request_count -= 1
+            from app.agent.errors import InputBudgetExceededError
+
+            raise InputBudgetExceededError(
+                f"rendered request ~{estimate['estimate_total_tokens']} tokens "
+                f"exceeds per-call budget {limit}; refusing to send "
+                "(constraints are never dropped to fit)"
+            )
         streamed: Any = getattr(self._client, "complete_streamed", None)
         if self._streaming_enabled and callable(streamed):
             response: LLMResponse = await streamed(
@@ -288,21 +334,15 @@ class OpenAICompatiblePlanningProvider:
         operation: str,
     ) -> Mapping[str, object]:
         request = self._request(operation=operation, messages=messages)
-        # Input accounting is computed on the EXACT message/tool payload
-        # handed to the provider — never on a parallel re-render. These
-        # are ESTIMATES (conservative CJK/Latin heuristic); provider
-        # truth arrives as usage.tokens_in below.
-        from app.prompts.career_planning import rendered_input_estimate
-
-        input_estimate = rendered_input_estimate(
-            messages,
-            tools=[
-                {"name": t.name, "description": t.description}
-                for t in (request.tools or [])
-            ],
-        )
-        self._enforce_input_budget(input_estimate)
+        # The gate and the estimate live at the send boundary
+        # (_complete_request) so every path shares them.
         response = await self._complete_request(request)
+        last = self.request_records[-1] if self.request_records else {}
+        input_estimate = {
+            k: v
+            for k, v in last.items()
+            if isinstance(v, int) and k.startswith("estimate_")
+        } or {"estimate_total_tokens": 0}
         usage = self._provider_usage(response)
         if response.content is None:
             return {

@@ -208,12 +208,31 @@ def compress_context_history(
     # newest-first sequence (scheduled_date desc, then original order as
     # the tiebreak), matching the runtime repository's ordering. Callers
     # may pass any order; the retained window is defined by THIS rule.
+    # Ordering contract (tasks AND reviews): recency is evaluated on a
+    # newest-first sequence. Tasks sort by scheduled_date desc; reviews
+    # sort by review_date desc (both with original order as the
+    # tiebreak), so callers may pass histories in ANY order.
+    #
+    # Note on recency semantics: the runtime repository orders by
+    # (state priority, updated_at desc) — an update-time proxy. The
+    # compression contract deliberately uses the SCHEDULED/REVIEW date
+    # instead: "recent" for planning purposes means the most recently
+    # SCHEDULED work (what the plan horizon should continue from), not
+    # the most recently EDITED row (a backfilled old task would
+    # otherwise hijack the window).
     ordered_tasks = sorted(
         enumerate(context.recent_tasks),
         key=lambda pair: (-pair[1].scheduled_date.toordinal(), pair[0]),
     )
+    ordered_reviews = sorted(
+        enumerate(context.recent_reviews),
+        key=lambda pair: (-pair[1].review_date.toordinal(), pair[0]),
+    )
     ordered_context = context.model_copy(
-        update={"recent_tasks": [task for _, task in ordered_tasks]}
+        update={
+            "recent_tasks": [task for _, task in ordered_tasks],
+            "recent_reviews": [review for _, review in ordered_reviews],
+        }
     )
     context = ordered_context
 
@@ -328,6 +347,13 @@ def compress_context_history(
         )
         summary_sources[task_summary] = folded
 
+    # Two-level over-limit reporting: (a) the compressed CONTEXT segment
+    # alone versus its budget, (b) the FINAL request (context + system
+    # prompt + output schema + tools) versus the per-call budget — the
+    # send-boundary gate acts on (b).
+    context_over_budget = bool(
+        max_context_tokens is not None and final_estimate > max_context_tokens
+    )
     return ContextCompressionResult(
         context=compressed,
         before_chars=before_chars,
@@ -337,9 +363,7 @@ def compress_context_history(
         promoted_task_count=promoted,
         budget_shrink_steps=shrink_steps,
         strategy=strategy.value,
-        over_budget=(
-            max_context_tokens is not None and final_estimate > max_context_tokens
-        ),
+        over_budget=context_over_budget,
         estimated_context_tokens=final_estimate,
         pruned=tuple(pruned),
         summary_sources=summary_sources,

@@ -1,4 +1,60 @@
-# 上下文管理效果验证 · 离线批次报告（v2 修订版）
+# 上下文管理效果验证 · 离线批次报告（v3 修订版）
+
+> 2026-08-31 v3 ｜ 全部结果为**合成/离线**（零模型调用）｜ v3 口径见
+> `docs/standards/metric-registry.md` ｜ 真实模型效果**待验证**
+
+## v3 验收修复（七项，全部先复现后修复）
+
+| # | 验收问题 | 复现证据 | 修复 |
+|---|---|---|---|
+| 1 | 预算检查不在共用发送入口 | `generate_agent_turn`（工具轮次）直接 `_complete_request` 无闸门；估算只含工具名+描述 | 闸门+逐请求记录（估算/预算/是否发送）移入 `_complete_request`——规划/工具/格式修复/业务修复四路共用；估算含完整工具 `input_json_schema`；压缩层与最终请求**两级超限分报** |
+| 2 | 数字子串匹配与否定状态 | `"30" in "130" → True`；状态表无 收到/未收到 | digit-run **精确集合**比较；否定泛化（未X/没X）且**子句局部**判定（混合状态摘要不跨对象泄漏）；新增 30→130、2→20、收到→未收到、混合状态四反例（评分测试共 11 项）；评分证据改为**实际渲染请求的子句** |
+| 3 | reviews 取旧弃新 | `retained_reviews = context.recent_reviews[:budget]` 无排序 | reviews 按 review_date desc 排序（乱序输入兼容）；docstring 写明 scheduled_date（规划语义"最近排期"）与仓库 updated_at（编辑时间代理）的区别 |
+| 4 | 调用计数不可靠 | live wrapper 只包 2 个方法；拒绝会被计为已调 | 计数移至**发送边界**（`sent_request_count`，预算拒绝不增加；mock 等无边界计数 provider 回退到方法计数，私有属性不委托）；失败 trial 保留已发生的调用/用量/错误（`execution_error` 字段） |
+| 5 | 评分条件与运行不一致 | live 评分重建 profile/日期（horizon/deadline 漂移） | 评分复用运行自身 `input_snapshot`（planning_window + 权威 completed_facts）与冻结配置；逐 trial 记录预算与请求记录；六分类统计（全部/产出计划/无计划/预算拒绝/运行失败/崩溃 + 产出计划违规率） |
+| 6 | 校验独立性未经图节点 | 前测直接调函数、未验证渲染输入全段 | 新测试经**真实 `_validator_node`**：先断言目标旧事项从完整渲染输入的记录/摘要/completed_facts **全部消失**（用同一压缩算法+冻结策略重建渲染上下文），再把重复候选推进真实节点断言被拒 |
+| 7 | 报告连续性 | — | v1/v2 保留并标注局限；新增独立留出集 cc-holdout-10/11（数字否定敏感、混合状态）；全样本/可发送样本分报 |
+
+## v3 离线结果（11 case × 21 标注事实，含 2 独立留出）
+
+| 策略 | 降幅（全样本） | 事实保留（全样本） | 保留（可发送样本†） |
+|---|---|---|---|
+| full | 0% | 21/21 | 19/19 |
+| recent | 8.8% | **15/21**（留出集 2 条因数字精确匹配判失） | 13/17 |
+| relevant_summary | 7.5% | **21/21** | 19/19 |
+
+†可发送 = 最终请求未超预算（cc-budget-07 在 full 与 relevant_summary 下
+显式超限：context 级与请求级均置位，真实链路由发送边界拒绝）。
+
+留出集行为验证：cc-holdout-10 的"投递 30 家公司/收到 2 个邀约"在 recent
+下因窗口外+数字精确判定 lost，在 relevant_summary 下经摘要保留——独立
+留出集与回归集结论方向一致，无口径修改。
+
+**边界声明**：离线相关性臂无真实 embedding（分支逻辑验证）；不预设任何
+策略优劣断言；全部 21 条事实的逐条判定证据（子句原文/锚点数/覆盖率/
+数字状态判定）在 `evals/artifacts/context-compression-v3-report.json`。
+
+## 复现命令
+
+```bash
+cd backend
+python scripts/context_compression_eval.py                  # v3 报告
+python -m pytest tests/test_context_fact_retention.py \
+                   tests/test_graph_validation_independence.py \
+                   tests/test_context_compression_live_mock.py \
+                   tests/test_llm_provider.py -k "budget"     # 链路证明
+```
+
+## 待真实模型验证
+
+实际 token/费用/生成质量/违规率。live 脚本已按六/五项修复就绪，但**本轮
+验收未运行付费调用**，不宣称真实实验就绪——需先跑一次小规模冒烟（3 trial）
+确认计数与快照断言在真实 provider 下成立，再授权全量（11 case × 3 策略 ×
+3 重复 ≈ 99 trial）。
+
+---
+
+# 以下为 v2 报告（已被 v3 取代，存档）
 
 > 2026-08-31 v2 ｜ 全部结果为**合成/离线**（零模型调用）｜ v2 口径预注册于
 > `docs/standards/metric-registry.md` ｜ 真实模型效果**待验证**

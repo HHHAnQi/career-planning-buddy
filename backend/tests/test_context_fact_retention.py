@@ -70,3 +70,35 @@ def test_request_echo_does_not_count() -> None:
         request_text="结合最近复盘调整下周安排",
     )
     assert verdict == "lost"
+
+
+def test_number_substring_130_vs_30_is_lost() -> None:
+    # v2 bug: "30" matched inside "130" via substring containment.
+    model_windows = ["每日 130 分钟高强度算法训练"]
+    verdict, detail = score_fact("每日 30 分钟算法训练", model_windows)
+    assert verdict == "lost", detail
+    assert detail["reason"] == "number_mismatch"
+
+
+def test_number_substring_20_vs_2_is_lost() -> None:
+    model_windows = ["完成 SQL 手写题 20 道打卡"]
+    verdict, detail = score_fact("练习 SQL 手写题 2 道", model_windows)
+    assert verdict == "lost", detail
+
+
+def test_negation_received_vs_not_received_is_lost() -> None:
+    model_windows = ["投递批次结束，尚未收到任何面试邀约"]
+    verdict, detail = score_fact("收到 2 个面试邀约", model_windows)
+    assert verdict == "lost", detail
+
+
+def test_mixed_status_summary_does_not_leak_across_objects() -> None:
+    # One summary line, two objects with OPPOSITE states: A completed,
+    # B incomplete. Fact about A must not inherit B's negation.
+    model_windows = [
+        "复盘：项目 A 收尾已完成；项目 B 联调未完成，遗留接口 3 个"
+    ]
+    verdict_a, detail_a = score_fact("项目 A 收尾已完成", model_windows)
+    assert verdict_a == "retained", detail_a
+    verdict_b, _ = score_fact("项目 B 联调已完成", model_windows)
+    assert verdict_b == "lost"

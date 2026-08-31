@@ -192,10 +192,19 @@ def test_offline_dataset_runner_end_to_end() -> None:
     assert result.returncode == 0, result.stderr[-500:]
     report = json.loads(Path("/tmp/cc-test-report.json").read_text(encoding="utf-8"))
     summary = report["summary"]
-    assert summary["full"]["mean_input_token_reduction"] == 0.0
-    # v2 schema: component-based scoring with explicit denominators.
-    # No superiority assertion is pre-registered — we only pin that the
-    # numbers exist and stay within [0, 1] with consistent totals.
+    # v3 schema: all_samples / sendable_samples split with explicit
+    # denominators. No superiority assertion is pre-registered; we pin
+    # internal consistency only.
     for strategy in ("full", "recent", "relevant_summary"):
-        micro = summary[strategy]["fact_retention_micro"]
-        assert micro["retained"] + micro["needs_review"] + micro["lost"] == micro["total"]
+        for subset in ("all_samples", "sendable_samples"):
+            block = summary[strategy][subset]
+            micro = block["fact_retention_micro"]
+            assert (
+                micro["retained"] + micro["needs_review"] + micro["lost"]
+                == micro["total"]
+            )
+        assert (
+            summary[strategy]["all_samples"]["cases"]
+            >= summary[strategy]["sendable_samples"]["cases"]
+        )
+    assert summary["full"]["all_samples"]["mean_input_token_reduction"] == 0.0

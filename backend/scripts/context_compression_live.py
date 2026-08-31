@@ -59,27 +59,57 @@ class _NoopScheduler:
 
 
 class CountingProvider:
-    """Transparent provider wrapper: counts real planning calls and
-    captures the last request estimate per trial."""
+    """Delegate wrapper. Preferred count source is the provider's own
+    send-boundary counter (sent_request_count: planning, tool turns,
+    format repair, business repair; budget refusals never increment it).
+    Providers without a boundary counter (the mock in tests) fall back
+    to method-level counting of the same entry points. Private attribute
+    lookups are never delegated, so copy/reconstruct protocols cannot
+    storm the inner object with wrapper bookkeeping."""
 
     def __init__(self, inner) -> None:
+        self._fallback_calls = 0
         self._inner = inner
-        self.calls = 0
-        self.last_input_estimate: dict[str, int] = {}
 
-    def __getattr__(self, name):  # delegate everything
+    def __getattr__(self, name):  # delegate everything public
+        if name.startswith("_"):
+            raise AttributeError(name)
         return getattr(self._inner, name)
 
-    async def generate_plan(self, *args, **kwargs):
-        self.calls += 1
-        raw = await self._inner.generate_plan(*args, **kwargs)
-        if isinstance(raw, dict) and isinstance(raw.get("input_estimate"), dict):
-            self.last_input_estimate = dict(raw["input_estimate"])
-        return raw
+    async def _counted(self, name, *args, **kwargs):
+        if not hasattr(self._inner, "sent_request_count"):
+            self._fallback_calls += 1
+        return await getattr(self._inner, name)(*args, **kwargs)
 
-    async def generate_agent_turn(self, *args, **kwargs):
-        self.calls += 1
-        return await self._inner.generate_agent_turn(*args, **kwargs)
+    async def generate_plan(self, *a, **kw):
+        return await self._counted("generate_plan", *a, **kw)
+
+    async def generate_agent_turn(self, *a, **kw):
+        return await self._counted("generate_agent_turn", *a, **kw)
+
+    async def repair_format(self, *a, **kw):
+        return await self._counted("repair_format", *a, **kw)
+
+    async def repair_business_rules(self, *a, **kw):
+        return await self._counted("repair_business_rules", *a, **kw)
+
+    async def generate_direct_plan(self, *a, **kw):
+        return await self._counted("generate_direct_plan", *a, **kw)
+
+    @property
+    def calls(self) -> int:
+        boundary = getattr(self._inner, "sent_request_count", None)
+        return boundary if boundary is not None else self._fallback_calls
+
+    @property
+    def last_input_estimate(self) -> dict[str, int]:
+        records = getattr(self._inner, "request_records", [])
+        last = records[-1] if records else {}
+        return {
+            k: v
+            for k, v in last.items()
+            if isinstance(v, int) and k.startswith("estimate_")
+        }
 
 
 def _settings_with_strategy(strategy: str):
@@ -220,14 +250,19 @@ async def _one_trial(factory, case: dict, strategy: str) -> dict[str, object]:
                 frozen.get("context_compression_strategy") == strategy
             ), f"strategy {strategy} not frozen in config snapshot"
 
-        counting = CountingProvider(
-            __import__(
-                "app.providers.llm", fromlist=["build_planning_provider"]
-            ).build_planning_provider(settings)
-        )
-        await AgentRunExecutor(
-            factory, provider=counting, tool_registry=None
-        ).execute(run_id)
+        from app.providers.llm import build_planning_provider
+
+        inner = build_planning_provider(settings)
+        counting = CountingProvider(inner)
+        execution_error: str | None = None
+        try:
+            await AgentRunExecutor(
+                factory, provider=counting, tool_registry=None
+            ).execute(run_id)
+        except Exception as exc:
+            # Failed trials KEEP their already-issued calls, usage, and
+            # the error itself — nothing is discarded.
+            execution_error = f"{type(exc).__name__}: {exc}"
     finally:
         _clear_strategy_override()
 
@@ -304,35 +339,51 @@ async def _one_trial(factory, case: dict, strategy: str) -> dict[str, object]:
                 if t["state"] == "completed"
             ]
             from app.agent.nodes import build_planning_context
-            from app.schemas.agent_runs import ProfileContext
 
-            profile_ctx = ProfileContext(
-                user_id=user.id,
-                version=1,
-                goal_type=GoalType.AI_BACKEND,
-                stage=CareerStage.PREPARING,
-                time_budget_minutes=case["profile"].get(
-                    "time_budget_minutes", 90
-                ),
-                skill_level=SkillLevel.INTERMEDIATE,
+            # Scoring reuses the run's OWN frozen conditions: the
+            # planning window and authoritative completed facts come from
+            # the persisted input snapshot (written pre-compression for
+            # facts), never a re-built context with different deadline or
+            # horizon.
+            from app.schemas.agent_runs import ProfileContext, RunInputSnapshot
+
+            snap = RunInputSnapshot.model_validate(
+                run.input_snapshot_json or {}
             )
             authoritative = build_planning_context(
-                profile=profile_ctx,
+                profile=ProfileContext(
+                    user_id=user.id,
+                    version=1,
+                    goal_type=GoalType.AI_BACKEND,
+                    stage=CareerStage.PREPARING,
+                    time_budget_minutes=case["profile"].get(
+                        "time_budget_minutes", 90
+                    ),
+                    skill_level=SkillLevel.INTERMEDIATE,
+                ),
                 requested_horizon_weeks=None,
                 source_plan_id=None,
                 source_plan_version=None,
-                completed_facts=history_completed,
+                completed_facts=list(snap.completed_facts) or history_completed,
                 blockers=[],
-                planning_date=plan.plan_date,
+                planning_date=snap.planning_window.planning_date,
+            ).model_copy(
+                update={"planning_window": snap.planning_window}
             )
             report = validate_candidate(candidate, authoritative)
             violations = [c.code for c in report.checks if not c.passed]
 
+        frozen_cfg = dict(run.config_snapshot_json or {})
         return {
             "run_id": str(run_id),
             "case_id": case["case_id"],
             "strategy": strategy,
             "status": run.status,
+            "execution_error": execution_error,
+            "budget": frozen_cfg.get("max_input_tokens_per_call"),
+            "request_records": list(
+                getattr(counting._inner, "request_records", [])
+            ),
             "fallback_reason": run.fallback_reason,
             "provider_tokens_in": run.total_tokens_in,
             "provider_tokens_out": run.total_tokens_out,
@@ -383,31 +434,50 @@ async def main() -> int:
     finally:
         await engine.dispose()
 
-    ok_rows = [r for r in rows if "error" not in r]
+    # Six-way accounting: every category keeps its members — nothing is
+    # dropped to make a rate look better.
+    def _bucket(r: dict[str, object]) -> str:
+        if "error" in r:
+            return "setup_or_crash_failed"
+        if r.get("execution_error"):
+            return "run_failed"
+        if not r.get("plan"):
+            return "no_plan_produced"
+        if any(
+            rec.get("sent") is False
+            for rec in (r.get("request_records") or [])  # type: ignore[arg-type]
+        ):
+            return "budget_refused"
+        return "plan_produced"
+
+    buckets: dict[str, list[dict[str, object]]] = {}
+    for r in rows:
+        buckets.setdefault(_bucket(r), []).append(r)
+    plans = buckets.get("plan_produced", [])
     summary = {
         "mode": "REAL MODEL (owner-authorized run)",
         "system_trials": len(rows),
         "actual_model_calls": sum(
-            int(r.get("provider_llm_calls", 0)) for r in ok_rows
+            int(r.get("provider_llm_calls", 0)) for r in rows
         ),
-        "failed_trials_kept": len(rows) - len(ok_rows),
+        "buckets": {k: len(v) for k, v in buckets.items()},
+        "violation_rate_among_produced_plans": round(
+            sum(1 for r in plans if r.get("violation_codes")) / max(1, len(plans)),
+            4,
+        ),
         "by_strategy": {
-            s: {
-                "trials": sum(1 for r in ok_rows if r["strategy"] == s),
+            strat: {
+                "trials": sum(1 for r in rows if r.get("strategy") == strat),
                 "mean_provider_tokens_in": _mean(
-                    [r["provider_tokens_in"] for r in ok_rows if r["strategy"] == s]
-                ),
-                "violation_rate": round(
-                    sum(
-                        1
-                        for r in ok_rows
-                        if r["strategy"] == s and r["violation_codes"]
-                    )
-                    / max(1, sum(1 for r in ok_rows if r["strategy"] == s)),
-                    4,
+                    [
+                        r["provider_tokens_in"]
+                        for r in rows
+                        if r.get("strategy") == strat
+                        and r.get("provider_tokens_in")
+                    ]
                 ),
             }
-            for s in STRATEGIES
+            for strat in STRATEGIES
         },
     }
     Path(str(out).replace(".jsonl", "-summary.json")).write_text(  # noqa: ASYNC240

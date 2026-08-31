@@ -110,24 +110,16 @@ def _context(case: dict) -> PlanningContext:
     ).model_copy(update={"recent_tasks": tasks, "recent_reviews": reviews})
 
 
-def _model_input_windows(result) -> list[str]:
-    """Text the MODEL actually receives — retained records and summary
-    lines only. summary_sources is deliberately excluded (provenance)."""
-    ctx = result.context
-    windows: list[str] = []
-    for task in ctx.recent_tasks:
-        parts = [task.title, task.deliverable]
-        if task.abandoned_reason_text:
-            parts.append(task.abandoned_reason_text)
-        windows.append(" ".join(p for p in parts if p))
-    for review in ctx.recent_reviews:
-        parts = [review.blockers or "", review.adjustment_request or ""]
-        windows.append(" ".join(p for p in parts if p))
-    if ctx.task_history_summary:
-        windows.append(ctx.task_history_summary)
-    if ctx.review_history_summary:
-        windows.append(ctx.review_history_summary)
-    return windows
+def _rendered_clauses(messages: list[dict[str, str]]) -> list[str]:
+    """Clauses of the ACTUAL rendered request the model receives — the
+    only legitimate scoring evidence. Reconstructed context fields and
+    provenance lists are never used for scoring."""
+    from evals.context_metrics import _split_clauses
+
+    body = "".join(
+        m["content"] for m in messages if m.get("role") != "system"
+    )
+    return _split_clauses(body)
 
 
 def _compress(context, budgets, request, strategy, max_tokens):
@@ -167,7 +159,12 @@ def run_case(case: dict, budgets: dict[str, int]) -> dict[str, object]:
             replan_mode=ReplanMode.CONTINUE,
         )
         tokens = estimate_text_tokens("".join(m["content"] for m in rendered))
-        windows = _model_input_windows(result)
+        windows = _rendered_clauses(rendered)
+        # Final-request over-limit (context + system + schema) measured
+        # on the same rendered messages with the per-section estimator.
+        from app.prompts.career_planning import rendered_input_estimate
+
+        final_estimate = rendered_input_estimate(rendered)
         fact_rows = []
         verdicts = []
         for fact in required:
@@ -178,6 +175,16 @@ def run_case(case: dict, budgets: dict[str, int]) -> dict[str, object]:
         needs_review = verdicts.count("needs_review")
         rows[strategy] = {
             "estimated_context_tokens": tokens,
+            "estimated_final_request_tokens": final_estimate[
+                "estimate_total_tokens"
+            ],
+            "context_over_budget": bool(
+                max_tokens is not None and tokens > max_tokens
+            ),
+            "final_request_over_budget": bool(
+                max_tokens is not None
+                and final_estimate["estimate_total_tokens"] > max_tokens
+            ),
             "input_token_reduction": (
                 round((full_tokens - tokens) / full_tokens, 4)
                 if full_tokens
@@ -224,7 +231,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default=str(DATASET))
     parser.add_argument(
-        "--out", default="evals/artifacts/context-compression-v2-report.json"
+        "--out", default="evals/artifacts/context-compression-v3-report.json"
     )
     parser.add_argument("--tasks-budget", type=int, default=5)
     parser.add_argument("--reviews-budget", type=int, default=2)
@@ -239,7 +246,13 @@ def main() -> int:
     per_case = [run_case(case, budgets) for case in cases]
 
     summary: dict[str, object] = {
-        "report_version": "v2",
+        "report_version": "v3",
+        "v2_caveat": (
+            "v2 scored against reconstructed context-field windows; v3 "
+            "scores against clauses of the ACTUAL rendered request, uses "
+            "exact digit-run sets (no substring matches), and judges "
+            "status/negation clause-locally."
+        ),
         "v1_caveat": (
             "v1 (context-compression-v1-report.json) scored retention "
             "against text the model never received (summary_sources) "
@@ -265,34 +278,54 @@ def main() -> int:
     }
     for strategy in STRATEGIES:
         rows = [c[strategy] for c in per_case]
-        reductions = [r["input_token_reduction"] for r in rows]
-        total = sum(r["facts_total"] for r in rows)
-        retained = sum(r["facts_retained"] for r in rows)
-        needs_review = sum(r["facts_needs_review"] for r in rows)
-        macro = [
-            r["fact_retention_macro"]
-            for r in rows
-            if r["fact_retention_macro"] is not None
+        sendable = [
+            r for r in rows if not r.get("final_request_over_budget")
         ]
+
+        def _block(subset: list, label: str) -> dict[str, object]:
+            reductions = [r["input_token_reduction"] for r in subset]
+            total = sum(r["facts_total"] for r in subset)
+            retained = sum(r["facts_retained"] for r in subset)
+            needs_review = sum(r["facts_needs_review"] for r in subset)
+            macro = [
+                r["fact_retention_macro"]
+                for r in subset
+                if r["fact_retention_macro"] is not None
+            ]
+            return {
+                "cases": len(subset),
+                "mean_input_token_reduction": (
+                    round(sum(reductions) / len(reductions), 4)
+                    if reductions
+                    else None
+                ),
+                "fact_retention_macro_mean": (
+                    round(sum(macro) / len(macro), 4) if macro else None
+                ),
+                "fact_retention_micro": (
+                    {
+                        "retained": retained,
+                        "needs_review": needs_review,
+                        "lost": total - retained - needs_review,
+                        "total": total,
+                        "denominator": f"{label}: all annotated facts",
+                    }
+                    if total
+                    else None
+                ),
+            }
+
         summary[strategy] = {
-            "mean_input_token_reduction": round(
-                sum(reductions) / len(reductions), 4
+            "all_samples": _block(rows, "all samples"),
+            "sendable_samples": _block(
+                sendable, "sendable samples (final request within budget)"
             ),
-            "fact_retention_macro_mean": (
-                round(sum(macro) / len(macro), 4) if macro else None
+            "context_over_budget_cases": sum(
+                1 for r in rows if r.get("context_over_budget")
             ),
-            "fact_retention_micro": (
-                {
-                    "retained": retained,
-                    "needs_review": needs_review,
-                    "lost": total - retained - needs_review,
-                    "total": total,
-                    "denominator": "all annotated facts across cases",
-                }
-                if total
-                else None
+            "final_request_over_budget_cases": sum(
+                1 for r in rows if r.get("final_request_over_budget")
             ),
-            "over_budget_cases": sum(1 for r in rows if r["over_budget"]),
         }
 
     out = Path(args.out)
