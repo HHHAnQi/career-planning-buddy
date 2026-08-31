@@ -34,6 +34,20 @@
 | v0.3 | +请求回声排除 | OFF 臂假阳性（计划复述请求词汇得分） | **post-hoc** |
 | 结论 | 三版均未产出显著组间差异；v0.3 冻结为诊断级，**质量维度主张降级为"证据不足"**，由独立 judge 盲评（阴性）交叉印证 | | |
 
+## 上下文压缩对照指标（v1，2026-08-31 预注册，跑前冻结）
+
+| 指标 | 冻结定义 | 阈值/口径 |
+|---|---|---|
+| `input_token_reduction` | (T_full − T_strategy)/T_full，T = estimate_text_tokens（保守 CJK/Latin 估算器）作用于 render_planning_context 渲染后的上下文段 | per-case + 均值；**估算口径，非精确 tokenizer、非 provider 实际用量** |
+| `required_fact_retention` | 标注 required_fact 的存活判定：出现在任一 retained record 文本中，**或**出现在 summary_sources 折叠来源清单中；锚点匹配复用 memory_grounded v0.3 的冻结锚点规则（ASCII 实体 + 非通用 CJK bigram ≥2，请求回声排除） | per-case 存活数/总数 |
+| `over_budget_rate` | 压缩结果 over_budget=True 的 case 占比（保留底线后仍超预算，显式状态） | 对照三策略 |
+| `authoritative_fact_integrity` | 不变式：validator 消费未压缩权威事实（completed_facts/recent_tasks 与压缩无关） | 必须 =1.0，违反即实现缺陷 |
+| `plan_constraint_violation_rate` | （**待验证**，需真实模型）validate_candidate(候选, 权威事实) 未全过的 case 占比 | 真实对照脚本产出 |
+
+对照设计：full / recent / relevant_summary 三策略；recent 与 relevant_summary
+使用**相同预算**（tasks=5, reviews=2）；其余配置冻结于 config snapshot。
+语义存活规则与 memory_grounded 共用同一冻结锚点实现（独立复核锚点）。
+
 ## 预注册模板（新指标必填）
 
 ```

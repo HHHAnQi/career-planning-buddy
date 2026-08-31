@@ -83,6 +83,7 @@ class SnapshotService:
             memory_disabled=settings.memory_disabled,
             business_repair_llm_enabled=settings.business_repair_llm_enabled,
             context_fanout_enabled=settings.context_fanout_enabled,
+            context_compression_strategy=settings.context_compression_strategy,
             memory_retrieval_limit=settings.memory_retrieval_limit,
             memory_context_max_items=settings.memory_context_max_items,
             memory_context_max_chars=settings.memory_context_max_chars,

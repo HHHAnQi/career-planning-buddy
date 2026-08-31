@@ -151,6 +151,9 @@ class Settings(BaseSettings):
     # LangGraph context fan-out: false runs the memory branch serially
     # inside the evidence branch (A/B measurement or degraded operation).
     context_fanout_enabled: bool = True
+    # Context-history strategy: full | recent | relevant_summary (see
+    # app/agent/context_compression.py CompressionStrategy).
+    context_compression_strategy: str = "relevant_summary"
     memory_retrieval_limit: int = Field(default=8, ge=1, le=20)
     memory_context_max_items: int = Field(default=5, ge=1, le=5)
     memory_context_max_chars: int = Field(default=1200, ge=100, le=10000)

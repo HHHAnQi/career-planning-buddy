@@ -392,7 +392,9 @@ class FixedPlanningGraph:
         """Join node: merges the memory_loader ∥ evidence_loader parcels,
         applies three-stage compression, and persists the input snapshot."""
 
-        async def merge() -> NodeOutput[tuple[PlanningContext, list[EvidenceCatalogItem]]]:
+        async def merge() -> NodeOutput[
+            tuple[PlanningContext, list[EvidenceCatalogItem], PlanningContext]
+        ]:
             profile = state["profile"]
             intent = state["intent"]
             if profile is None or intent.effective_goal_type is None:
@@ -456,7 +458,11 @@ class FixedPlanningGraph:
                 max_context_tokens=config.max_input_tokens_per_call,
                 query_vector=memory_parcel.query_vector,
                 task_vectors=task_vectors,
+                strategy=getattr(
+                    config, "context_compression_strategy", "relevant_summary"
+                ),
             )
+            authoritative = context  # pre-compression, for rule validation
             context = compression.context
             if compression.promoted_task_count or compression.budget_shrink_steps:
                 logger.info(
@@ -515,7 +521,7 @@ class FixedPlanningGraph:
                         session, state["run_id"], snapshot
                     )
             return NodeOutput(
-                (context, evidence_catalog),
+                (context, evidence_catalog, authoritative),
                 NodeTelemetry(
                     trace_data={
                         "token_estimate": context.token_estimate,
@@ -537,13 +543,14 @@ class FixedPlanningGraph:
                 ),
             )
 
-        context, evidence_catalog = await self._nodes.run(
+        context, evidence_catalog, authoritative = await self._nodes.run(
             state["run_id"],
             "context_builder",
             merge,
         )
         return {
             "planning_context": context,
+            "authoritative_context": authoritative,
             "evidence_catalog": evidence_catalog,
             "tool_round": 0,
             "tool_call_count": 0,
@@ -577,7 +584,7 @@ class FixedPlanningGraph:
             "rule_validator",
             lambda: self._validate_with_trace(
                 state["candidate_plan"],
-                state["planning_context"],
+                state.get("authoritative_context") or state["planning_context"],
                 state["candidate_evidence_visibility"],
                 attempt,
             ),
@@ -1111,11 +1118,36 @@ class FixedPlanningGraph:
         stream_summaries: list[dict[str, object]] = []
         prompt_version = state["runtime_config"].prompt_versions["career_planning"]
 
+        # Final-render input accounting: ESTIMATED per-section sizes of the
+        # exact request text sent to the provider (system + rendered context
+        # + tool definitions). Distinguish from provider-reported usage
+        # (usage.tokens_in) — one is an estimate, the other the actual bill.
+        from app.prompts.career_planning import (
+            generation_messages,
+            rendered_input_estimate,
+        )
+
+        _input_estimate = rendered_input_estimate(
+            generation_messages(
+                message=state["request"].message,
+                context=context,
+                replan_mode=mode,
+                evidence_catalog=evidence_catalog,
+            ),
+            tools=[
+                {"name": spec.name, "description": spec.description}
+                for spec in self._tool_registry.available_specs()
+            ],
+        )
+
         def _step_telemetry(visibility: EvidenceVisibility) -> NodeTelemetry:
             # Every return path below follows at least one provider call,
             # so total_usage is always bound by the time this runs.
             assert total_usage is not None
             telemetry = self._telemetry(total_usage, prompt_version, visibility)
+            telemetry.trace_data.update(
+                {f"input_{k}": v for k, v in _input_estimate.items()}
+            )
             if stream_summaries:
                 telemetry.trace_data["llm_stream"] = stream_summaries
             return telemetry
@@ -1397,7 +1429,10 @@ class FixedPlanningGraph:
             state["candidate_plan"], context, failed_codes
         )
         if deterministically_fixed is not None:
-            recheck = validate_candidate(deterministically_fixed, context)
+            recheck = validate_candidate(
+                deterministically_fixed,
+                state.get("authoritative_context") or context,
+            )
             if recheck.passed:
                 _, visibility = build_evidence_visibility(
                     call_id=f"{state['run_id']}:deterministic_repair",

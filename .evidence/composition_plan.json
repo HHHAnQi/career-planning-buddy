@@ -1,47 +1,72 @@
 {
-  "plan_id": "careerbuddy-composition-plan-v1.1",
-  "registry_ref": "careerbuddy-claim-registry-v1.1 (.evidence/claim_registry.json)",
-  "target_role": "Agent Engineer",
+  "plan_id": "careerbuddy-composition-plan-v1.4-hhhanqi-ownership-filtered",
+  "registry_ref": "careerbuddy-claim-registry-v1.1 (.evidence/claim_registry.json, 30 claims; C110 scoped ownership VERIFIED for HHHAnQi)",
+  "target_role": "Agent Engineer / AI Application Engineer",
   "bullets": [
     {
       "bullet_id": "B1",
-      "primary_signal_id": "S01",
-      "claim_refs": ["C001", "C002", "C003"],
-      "supporting_mechanism_claim_refs": ["C002", "C003"],
-      "result_claim_ref": null,
-      "ownership_claim_ref": null,
-      "coverage_slot": "agent_architecture_and_orchestration",
-      "text": "实现 LangGraph 职业规划 Agent：风险门与意图路由条件分流、记忆/证据加载图内并行 fan-out、预算约束的有界修复回边（业务/格式修复各至多一次）；工具循环内嵌于生成节点（轮次与调用数上限、耗尽强制产出、并行调用保序、最终回退确定性模板），并构建三级修复升级阶梯——封闭规则集确定性代码修复 → 预算门控单次 LLM 修复 → 模板降级，修复路径以五级 provenance 标签随运行事件输出，供评测拆分模型与工程贡献。"
+      "primary_signal_id": "S04",
+      "claim_refs": [
+        "C007",
+        "C008",
+        "C017",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C008"
+      ],
+      "result_claim_ref": "C017",
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "evaluation_control_plane_and_integrity",
+      "text": "实现数据库承载的 Agent 评测控制平面（实验/trial/评分三级，数据集与运行时身份 sha256 冻结，mock/fixture/live 三种 provider 模式）：构建实验臂不变量在试验前后校验声明臂与真实轨迹一致，据此发现并修正“伪裸基线”（对照臂仍在接受确定性记忆预执行）；当前冻结版本 trial 级硬门禁通过率 88.9%（80/90，30 任务×3 次重跑，GLM-4.7 live，Wilson 95% CI [80.7, 93.9]），90 个匿名化 trial 与全量评分以 SHA256 清单生成公开证据包随仓库归档。"
     },
     {
       "bullet_id": "B2",
-      "primary_signal_id": "S03",
-      "claim_refs": ["C004", "C005", "C006"],
-      "supporting_mechanism_claim_refs": ["C005", "C006"],
-      "result_claim_ref": null,
-      "ownership_claim_ref": null,
-      "coverage_slot": "durable_execution_and_streaming",
-      "text": "在纯 Postgres 上实现 Agent 持久执行与事件流：FOR UPDATE SKIP LOCKED 认领、租约心跳、逐事务 owner 栅栏、崩溃恢复重入队并先抢租约再终态化旧 owner；终态契约由 DB 唯一索引兜底（每运行恰好一个终态事件），终结事务原子完成结果持久化/成本汇总/租约清理，且候选引用的证据必须对最终一次模型调用可见方可持久化；SSE 事件流以数据库为权威存储，支持 Last-Event-ID 断线续传与幂等协作式取消（同幂等键不同 payload 返回 409）。"
+      "primary_signal_id": "S02",
+      "claim_refs": [
+        "C003",
+        "C019",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C003"
+      ],
+      "result_claim_ref": "C019",
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "deterministic_repair_and_attribution",
+      "text": "实现 Agent 确定性修复模块与修复归因：封闭规则集的代码修复作为 LLM 修复失败的工程兜底（深拷贝修补违规字段、修复失败再降级确定性模板），五级 provenance 标签（model_pass/deterministic_repair/llm_repair/format_repair/fallback）逐运行记录产出路径；公开证据包实测 79 个产出计划的运行中 55 个模型首过、12 个由确定性/格式修复兜底、2 个模板降级。"
     },
     {
       "bullet_id": "B3",
-      "primary_signal_id": "S04",
-      "claim_refs": ["C007", "C008", "C010", "C009"],
-      "supporting_mechanism_claim_refs": ["C008", "C010"],
-      "result_claim_ref": "C009",
-      "ownership_claim_ref": null,
-      "coverage_slot": "evaluation_infrastructure",
-      "text": "构建数据库承载的 Agent 评测控制平面（实验/trial/评分三级、数据集与运行时身份 sha256 冻结、Wilson CI、mock/fixture/live 三种 provider 模式）：以实验臂不变量在试验前后校验声明臂与真实轨迹一致，据此发现首轮'裸模型'基线实际仍接受确定性记忆预执行与上下文注入，修正重跑后真裸基线为 72.4%（21/29，失败明细由原始 bad-case 导出核验）；成对比较判官实施双槽位换位与位置偏差度量、以双人标注金集计算 Cohen's κ，未达冻结阈值（一致率/偏差/样本量三态门）的判官仅可诊断、不得作门禁。"
+      "primary_signal_id": "S06",
+      "claim_refs": [
+        "C015",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C015"
+      ],
+      "result_claim_ref": null,
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "hybrid_rag_retrieval",
+      "text": "实现 PostgreSQL 混合检索管线：结构感知分块，pgvector HNSW 与 pg_trgm 词法双通道经 RRF(k=60) 融合，“宽召回窄重排”（召回 50 仅取 top-20 进重排器、重排器接收原始 query 而非同义扩展），并以相对可回答性门（top 分数不足即返回零结果）作为防幻觉契约——两条重排策略均由实测回归驱动修正。"
     },
     {
       "bullet_id": "B4",
-      "primary_signal_id": "S05",
-      "claim_refs": ["C013", "C014"],
-      "supporting_mechanism_claim_refs": ["C013", "C014"],
+      "primary_signal_id": "S02",
+      "claim_refs": [
+        "C111",
+        "C014",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C111",
+        "C014"
+      ],
       "result_claim_ref": null,
-      "ownership_claim_ref": null,
-      "coverage_slot": "context_engineering",
-      "text": "实现零 LLM 调用的三级确定性上下文压缩（bigram+嵌入混合相关性救援、动态 token 预算逐步收缩但不破下限、裁剪内容折叠进结构化摘要而非静默丢弃）与可审计上下文构建清单：候选经词法+嵌入双路 RRF 融合与贪心 MMR 去冗余选择，提示注入命中项清零计分并记录排除原因，完整清单（入选引用、逐项排除原因、渲染哈希、算法版本）随运行持久化可复算。"
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "resume_agent_deterministic_execution",
+      "text": "实现简历优化 Agent 的确定性执行与可审计上下文：域工具由运行时确定性编排（gap 分析+批量证据检索），模型输出的 claim 文本/跨度/工具调用 ID 以冻结字段重盖、证据集 bundle_hash 锚定防漂移；上下文候选经 RRF+MMR 去冗余选择，提示注入命中清零计分并记录排除原因，完整构建清单随运行持久化可复算。"
     }
   ]
 }

@@ -190,6 +190,35 @@ def plan_json_schema() -> dict[str, object]:
     return PlanCandidate.model_json_schema()
 
 
+def rendered_input_estimate(
+    messages: list[dict[str, str]],
+    *,
+    tools: list[dict[str, object]] | None = None,
+) -> dict[str, int]:
+    """Per-section ESTIMATED token sizes of the final rendered request.
+
+    Estimates use the conservative mixed CJK/Latin estimator from
+    app.agent.context_compression.estimate_text_tokens — they are NOT
+    exact tokenizer counts and NOT provider-reported usage; the trace
+    keeps all three kinds distinguishable (estimate_* vs provider
+    usage.tokens_in recorded separately by the provider call).
+    """
+    from app.agent.context_compression import estimate_text_tokens
+
+    system = next((m["content"] for m in messages if m.get("role") == "system"), "")
+    user = "".join(
+        m["content"] for m in messages if m.get("role") != "system"
+    )
+    tools_text = "".join(str(t) for t in (tools or []))
+    return {
+        "estimate_system_tokens": estimate_text_tokens(system),
+        "estimate_user_tokens": estimate_text_tokens(user),
+        "estimate_tools_tokens": estimate_text_tokens(tools_text),
+        "estimate_total_tokens": estimate_text_tokens(system + user)
+        + estimate_text_tokens(tools_text),
+    }
+
+
 def _messages(*, context_text: str, payload: Mapping[str, object]) -> list[dict[str, str]]:
     return [
         {"role": "system", "content": SYSTEM_PROMPT},

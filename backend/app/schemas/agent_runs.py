@@ -163,6 +163,12 @@ class RuntimeConfigSnapshot(StrictModel):
     exclude_memory_categories: list[str] = Field(default_factory=list, max_length=8)
     context_recent_tasks_budget: int = Field(default=5, ge=0, le=30)
     context_recent_reviews_budget: int = Field(default=2, ge=0, le=10)
+    # Switchable context-history strategy for controlled comparison
+    # (full | recent | relevant_summary). "recent" and "relevant_summary"
+    # share the budgets above; "full" bypasses compression entirely.
+    context_compression_strategy: Literal["full", "recent", "relevant_summary"] = (
+        "relevant_summary"
+    )
     tool_required: bool = False
     expected_citations: list[str] = Field(default_factory=list, max_length=20)
     execution_kind: Literal[
@@ -496,6 +502,10 @@ class PlanningState(TypedDict, total=False):
     # Parallel context fan-out parcels (memory_loader ∥ evidence_loader).
     memory_parcel: MemoryParcel
     history_parcel: HistoryParcel
+    # PRE-compression authoritative context: business validation
+    # (completed facts, budget, continuity) reads this, never the
+    # compressed model input — compression cannot weaken rule checks.
+    authoritative_context: PlanningContext
 
 
 class AgentEventPayload(StrictModel):

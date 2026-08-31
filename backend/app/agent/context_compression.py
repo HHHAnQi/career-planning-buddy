@@ -15,6 +15,7 @@ Three-stage pipeline, all deterministic (no LLM call):
 """
 
 from dataclasses import dataclass
+from enum import StrEnum
 from math import ceil
 
 from app.schemas.agent_runs import PlanningContext, ReviewContext, TaskContext
@@ -23,6 +24,32 @@ _RELEVANCE_RESCUE_LIMIT = 2
 _RELEVANCE_RESCUE_THRESHOLD = 0.08
 _MIN_RETAINED_TASKS = 2
 _MIN_RETAINED_REVIEWS = 1
+
+
+class CompressionStrategy(StrEnum):
+    """Switchable context-history strategies for controlled comparison.
+
+    full:            no compression (baseline; still reports estimate and
+                     over-budget status).
+    recent:          pure recency window at the configured budgets.
+    relevant_summary: recency window + hybrid-relevance rescue + summary
+                     folding (production default). Uses the SAME budgets
+                     as ``recent`` so the two are comparable.
+    """
+
+    FULL = "full"
+    RECENT = "recent"
+    RELEVANT_SUMMARY = "relevant_summary"
+
+
+@dataclass(frozen=True, slots=True)
+class PrunedRecord:
+    """Provenance for one record removed from the retained window."""
+
+    task_id: object
+    kind: str  # task | review | completed_fact
+    reason: str  # recency_window | budget_shrink | irrelevance
+    original_deliverable: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +61,16 @@ class ContextCompressionResult:
     review_compressed_count: int
     promoted_task_count: int = 0
     budget_shrink_steps: int = 0
+    strategy: str = "relevant_summary"
+    # Residual over-budget signal: the serialized context still exceeds
+    # the per-call input budget AFTER the retention floor. Callers must
+    # surface this — never silently drop constraints to fit.
+    over_budget: bool = False
+    estimated_context_tokens: int = 0
+    pruned: tuple[PrunedRecord, ...] = ()
+    # summary line -> the original deliverables it was folded from, so
+    # downstream audits can trace every summarized fact to its source.
+    summary_sources: dict[str, tuple[str, ...]] | None = None
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -93,11 +130,12 @@ def _select_retained_tasks(
     *,
     query_vector: list[float] | None = None,
     task_vectors: dict[int, list[float]] | None = None,
+    rescue_enabled: bool = True,
 ) -> tuple[list[TaskContext], list[TaskContext], int]:
     """Recency window + bounded relevance rescue from older tasks."""
     recent = tasks[:budget]
     older = tasks[budget:]
-    if not older or not focus_query:
+    if not rescue_enabled or not older or not focus_query:
         return recent, older, 0
     focus_bigrams = _bigrams(focus_query)
     vectors = task_vectors or {}
@@ -134,20 +172,45 @@ def compress_context_history(
     max_context_tokens: int | None = None,
     query_vector: list[float] | None = None,
     task_vectors: dict[int, list[float]] | None = None,
+    strategy: CompressionStrategy | str = CompressionStrategy.RELEVANT_SUMMARY,
 ) -> ContextCompressionResult:
-    """Compress history.
+    """Compress history under a switchable strategy.
 
-    PR-8 exposes the per-context budget as kwargs. Pre-PR-8 callers see the
-    same defaults (5 tasks / 2 reviews) and identical behaviour when the
-    new relevance/budget knobs are omitted.
+    ``full`` is the identity baseline (no pruning, no summary), ``recent``
+    is a pure recency window, ``relevant_summary`` adds hybrid-relevance
+    rescue and summary folding. ``recent`` and ``relevant_summary`` share
+    the SAME budgets so A/B comparisons isolate the relevance/summary
+    machinery. Compression only shapes the MODEL INPUT; authoritative
+    business facts are validated from the uncompressed records (see
+    graph validator wiring), never from this output.
     """
+    if not isinstance(strategy, CompressionStrategy):
+        strategy = CompressionStrategy(strategy)
     before_chars = len(context.model_dump_json())
+
+    if strategy is CompressionStrategy.FULL:
+        estimate = estimate_text_tokens(context.model_dump_json())
+        return ContextCompressionResult(
+            context=context,
+            before_chars=before_chars,
+            after_chars=before_chars,
+            task_compressed_count=0,
+            review_compressed_count=0,
+            strategy=strategy.value,
+            estimated_context_tokens=estimate,
+            over_budget=(
+                max_context_tokens is not None
+                and estimate > max_context_tokens
+            ),
+        )
+
     retained_tasks, older_tasks, promoted = _select_retained_tasks(
         context.recent_tasks,
         recent_tasks_budget,
         focus_query,
         query_vector=query_vector,
         task_vectors=task_vectors,
+        rescue_enabled=strategy is CompressionStrategy.RELEVANT_SUMMARY,
     )
     retained_reviews = context.recent_reviews[:recent_reviews_budget]
     older_reviews = context.recent_reviews[recent_reviews_budget:]
@@ -170,8 +233,12 @@ def compress_context_history(
                 older_reviews = [retained_reviews.pop()] + older_reviews
             shrink_steps += 1
 
-    task_summary = _task_summary(older_tasks)
-    review_summary = _review_summary(older_reviews)
+    if strategy is CompressionStrategy.RELEVANT_SUMMARY:
+        task_summary = _task_summary(older_tasks)
+        review_summary = _review_summary(older_reviews)
+    else:
+        task_summary = None
+        review_summary = None
     summarized_deliverables = {task.deliverable.strip() for task in context.recent_tasks}
     completed_facts = [
         fact
@@ -193,6 +260,39 @@ def compress_context_history(
     final_estimate = estimate_text_tokens(compressed.model_dump_json())
     if final_estimate != token_estimate:
         compressed = compressed.model_copy(update={"token_estimate": final_estimate})
+
+    # Provenance: every pruned record with its reason, and every summary
+    # line mapped back to the original deliverables it folded.
+    retained_ids = {task.task_id for task in retained_tasks}
+    pruned: list[PrunedRecord] = []
+    for index, task in enumerate(context.recent_tasks):
+        if task.task_id in retained_ids:
+            continue
+        if index < recent_tasks_budget:
+            reason = "budget_shrink"
+        elif strategy is CompressionStrategy.RELEVANT_SUMMARY:
+            reason = "irrelevance"
+        else:
+            reason = "recency_window"
+        pruned.append(
+            PrunedRecord(
+                task_id=task.task_id,
+                kind="task",
+                reason=reason,
+                original_deliverable=task.deliverable,
+            )
+        )
+    summary_sources: dict[str, tuple[str, ...]] = {}
+    if task_summary:
+        folded = tuple(
+            dict.fromkeys(
+                task.deliverable.strip()
+                for task in older_tasks
+                if task.state == "completed"
+            )
+        )
+        summary_sources[task_summary] = folded
+
     return ContextCompressionResult(
         context=compressed,
         before_chars=before_chars,
@@ -201,6 +301,13 @@ def compress_context_history(
         review_compressed_count=len(context.recent_reviews) - len(retained_reviews),
         promoted_task_count=promoted,
         budget_shrink_steps=shrink_steps,
+        strategy=strategy.value,
+        over_budget=(
+            max_context_tokens is not None and final_estimate > max_context_tokens
+        ),
+        estimated_context_tokens=final_estimate,
+        pruned=tuple(pruned),
+        summary_sources=summary_sources,
     )
 
 
