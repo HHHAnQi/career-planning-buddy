@@ -417,6 +417,9 @@ class ProviderPlanResponse(StrictModel):
     # Optional LLM violation-type classification emitted by the
     # business-repair prompt; None on every non-repair path.
     violation_category: Annotated[str | None, Field(max_length=64)] = None
+    # Provider-computed ESTIMATED input sizes of the actual request
+    # (system/user/tools). Estimate only — provider truth is usage.
+    input_estimate: dict[str, int] | None = None
 
 
 class ProviderToolCall(StrictModel):

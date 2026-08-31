@@ -1,17 +1,20 @@
-"""Offline context-compression comparison (deterministic, zero model calls).
+"""Offline context-compression comparison v2 (deterministic, zero calls).
 
-Runs the three pre-registered strategies (full / recent /
-relevant_summary) over evals/datasets/context-compression-v1.jsonl and
-computes the frozen metrics from docs/standards/metric-registry.md:
+Corrections over v1 (whose report is retained with caveats):
 
-  input_token_reduction     estimate-based, rendered context section only
-  required_fact_retention   anchor rule shared with memory_grounded v0.3
-  over_budget_rate          explicit residual over-budget status
-  authoritative_fact_integrity  invariant: validator facts unaffected
+  * model-input scoring ONLY — retention is judged on the text windows
+    the model actually receives (retained records + summary lines);
+    summary_sources is provenance, never scoring input;
+  * newest-first retention contract (compression sorts internally);
+  * component-based fact scoring (numbers / status / anchors / coverage)
+    with an explicit needs_review bucket — never counted as retained;
+  * recent and relevant_summary optimize the SAME final input budget
+    (summaries participate in the shrink loop);
+  * over-budget results reported, never dropped.
 
-Everything here is SYNTHETIC/OFFLINE — no provider calls. The real-model
-comparison lives in scripts/context_compression_live.py (run separately,
-owner-authorized only).
+Offline results validate BRANCH LOGIC on synthetic histories only — the
+relevance arm runs without real embeddings here, so no claim about true
+semantic recall is made.
 """
 
 from __future__ import annotations
@@ -26,7 +29,6 @@ from app.agent.context_compression import (
     compress_context_history,
     estimate_text_tokens,
 )
-from app.agent.context_selection import build_memory_query  # noqa: F401 (doc link)
 from app.prompts.career_planning import generation_messages
 from app.schemas.agent_runs import (
     PlanningContext,
@@ -34,17 +36,20 @@ from app.schemas.agent_runs import (
     ReviewContext,
     TaskContext,
 )
-from app.schemas.enums import CareerStage, GoalType, ReplanMode, SkillLevel, TaskStatus
-from evals.v2.graders.model import _distinctive_anchors
+from app.schemas.enums import (
+    CareerStage,
+    GoalType,
+    ReplanMode,
+    SkillLevel,
+    TaskStatus,
+)
+from evals.context_metrics import score_fact
 
-DATASET = Path(__file__).resolve().parents[1] / "evals/datasets/context-compression-v1.jsonl"
+DATASET = (
+    Path(__file__).resolve().parents[1] / "evals/datasets/context-compression-v1.jsonl"
+)
 STRATEGIES = ("full", "recent", "relevant_summary")
 PLANNING_DATE = date(2026, 8, 31)
-
-GOAL_MAP = {
-    "job_search": GoalType.AI_BACKEND,
-    "backend_dev": GoalType.BACKEND_JAVA,
-}
 
 
 def _profile(case: dict) -> ProfileContext:
@@ -52,7 +57,7 @@ def _profile(case: dict) -> ProfileContext:
     return ProfileContext(
         user_id=uuid4(),
         version=1,
-        goal_type=GOAL_MAP.get(raw.get("goal_type", "job_search"), GoalType.AI_BACKEND),
+        goal_type=GoalType.AI_BACKEND,
         stage=CareerStage.PREPARING,
         time_budget_minutes=raw.get("time_budget_minutes", 90),
         skill_level=SkillLevel.INTERMEDIATE,
@@ -60,11 +65,16 @@ def _profile(case: dict) -> ProfileContext:
 
 
 def _context(case: dict) -> PlanningContext:
-    profile = _profile(case)
+    from app.agent.nodes import build_planning_context
+
     tasks = [
         TaskContext(
             task_id=uuid4(),
-            state=TaskStatus.COMPLETED if t["state"] == "completed" else TaskStatus.ABANDONED,
+            state=(
+                TaskStatus.COMPLETED
+                if t["state"] == "completed"
+                else TaskStatus.ABANDONED
+            ),
             title=t["deliverable"][:40],
             deliverable=t["deliverable"],
             scheduled_date=date.fromisoformat(t["date"]),
@@ -83,14 +93,6 @@ def _context(case: dict) -> PlanningContext:
         )
         for r in case["history"].get("reviews", [])
     ]
-    return _build(profile, tasks, reviews)
-
-
-def _build(profile, tasks, reviews) -> PlanningContext:
-    # PlanningContext requires a planning_window; construct via the same
-    # builder the runtime uses for consistency.
-    from app.agent.nodes import build_planning_context
-
     completed = [t.deliverable for t in tasks if t.state == TaskStatus.COMPLETED]
     blockers = [
         t.abandoned_reason_text or t.deliverable
@@ -98,96 +100,118 @@ def _build(profile, tasks, reviews) -> PlanningContext:
         if t.state == TaskStatus.ABANDONED
     ]
     return build_planning_context(
-        profile=profile,
+        profile=_profile(case),
         requested_horizon_weeks=None,
         source_plan_id=None,
         source_plan_version=None,
         completed_facts=completed,
         blockers=blockers,
         planning_date=PLANNING_DATE,
-    ).model_copy(
-        update={"recent_tasks": tasks, "recent_reviews": reviews}
-    )
+    ).model_copy(update={"recent_tasks": tasks, "recent_reviews": reviews})
 
 
-def _retained_text(result) -> str:
+def _model_input_windows(result) -> list[str]:
+    """Text the MODEL actually receives — retained records and summary
+    lines only. summary_sources is deliberately excluded (provenance)."""
     ctx = result.context
-    parts: list[str] = []
+    windows: list[str] = []
     for task in ctx.recent_tasks:
-        parts.append(f"{task.title} {task.deliverable} {task.abandoned_reason_text or ''}")
+        parts = [task.title, task.deliverable]
+        if task.abandoned_reason_text:
+            parts.append(task.abandoned_reason_text)
+        windows.append(" ".join(p for p in parts if p))
     for review in ctx.recent_reviews:
-        parts.append(f"{review.blockers or ''} {review.adjustment_request or ''}")
+        parts = [review.blockers or "", review.adjustment_request or ""]
+        windows.append(" ".join(p for p in parts if p))
     if ctx.task_history_summary:
-        parts.append(ctx.task_history_summary)
-        for source in (result.summary_sources or {}).get(ctx.task_history_summary, ()):
-            parts.append(source)
+        windows.append(ctx.task_history_summary)
     if ctx.review_history_summary:
-        parts.append(ctx.review_history_summary)
-    return " ".join(parts)
+        windows.append(ctx.review_history_summary)
+    return windows
 
 
-def _fact_survives(fact: str, retained_text: str, request: str) -> bool:
-    return _distinctive_anchors(fact, retained_text, request_text=request) >= 2
+def _compress(context, budgets, request, strategy, max_tokens):
+    return compress_context_history(
+        context,
+        recent_tasks_budget=budgets["tasks"],
+        recent_reviews_budget=budgets["reviews"],
+        focus_query=request,
+        max_context_tokens=max_tokens,
+        strategy=strategy,
+    )
 
 
 def run_case(case: dict, budgets: dict[str, int]) -> dict[str, object]:
     context = _context(case)
     request = case["request"]
     annotations = case["annotations"]
+    required = annotations["required_facts"]
+    max_tokens = case.get("max_context_tokens")
+
     rendered_full = generation_messages(
         message=request, context=context, replan_mode=ReplanMode.CONTINUE
     )
     full_tokens = estimate_text_tokens(
         "".join(m["content"] for m in rendered_full)
     )
-    rows: dict[str, object] = {"case_id": case["case_id"], "scenario": case["scenario"]}
+
+    rows: dict[str, object] = {
+        "case_id": case["case_id"],
+        "scenario": case["scenario"],
+    }
     for strategy in STRATEGIES:
-        result = compress_context_history(
-            context,
-            recent_tasks_budget=budgets["tasks"],
-            recent_reviews_budget=budgets["reviews"],
-            focus_query=request,
-            max_context_tokens=case.get("max_context_tokens"),
-            strategy=strategy,
-        )
+        result = _compress(context, budgets, request, strategy, max_tokens)
         rendered = generation_messages(
             message=request,
             context=result.context,
             replan_mode=ReplanMode.CONTINUE,
         )
         tokens = estimate_text_tokens("".join(m["content"] for m in rendered))
-        retained_text = _retained_text(result)
-        required = annotations["required_facts"]
-        survived = [
-            fact
-            for fact in required
-            if _fact_survives(fact, retained_text, request)
-        ]
+        windows = _model_input_windows(result)
+        fact_rows = []
+        verdicts = []
+        for fact in required:
+            verdict, detail = score_fact(fact, windows, request_text=request)
+            verdicts.append(verdict)
+            fact_rows.append({"fact": fact, "verdict": verdict, "detail": detail})
+        retained = verdicts.count("retained")
+        needs_review = verdicts.count("needs_review")
         rows[strategy] = {
             "estimated_context_tokens": tokens,
             "input_token_reduction": (
-                round((full_tokens - tokens) / full_tokens, 4) if full_tokens else 0.0
+                round((full_tokens - tokens) / full_tokens, 4)
+                if full_tokens
+                else 0.0
             ),
-            "required_fact_retention": (
-                round(len(survived) / len(required), 4) if required else None
+            "facts_total": len(required),
+            "facts_retained": retained,
+            "facts_needs_review": needs_review,
+            "facts_lost": len(required) - retained - needs_review,
+            "fact_retention_macro": (
+                round(retained / len(required), 4) if required else None
             ),
-            "missing_facts": [f for f in required if f not in survived],
+            "fact_details": fact_rows,
             "over_budget": result.over_budget,
             "budget_shrink_steps": result.budget_shrink_steps,
             "promoted_task_count": result.promoted_task_count,
             "pruned": [
-                {
-                    "kind": p.kind,
-                    "reason": p.reason,
-                    "deliverable": p.original_deliverable,
-                }
+                {"reason": p.reason, "deliverable": p.original_deliverable}
                 for p in result.pruned
             ],
         }
-    # Invariant: authoritative facts (pre-compression) untouched by every
-    # strategy — the validator input is the same object regardless.
-    rows["authoritative_fact_integrity"] = 1.0
-    rows["authoritative_completed_facts"] = context.completed_facts
+
+    # Branch assertion (case-level): for the out-of-window-relevant
+    # scenario the relevance arm must engage rescue OR keep the fact via
+    # its summary — otherwise the "relevance" label is untested.
+    if case["scenario"].startswith("old_but_relevant"):
+        rel = rows["relevant_summary"]
+        rows["branch_check"] = {
+            "scenario": case["scenario"],
+            "relevant_arm_promoted": rel["promoted_task_count"] >= 1,
+            "relevant_arm_keeps_fact_via_window_or_summary": any(
+                f["verdict"] == "retained" for f in rel["fact_details"]
+            ),
+        }
     rows["annotations_reference"] = {
         "required_facts": required,
         "must_not_repeat": annotations["must_not_repeat"],
@@ -200,7 +224,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default=str(DATASET))
     parser.add_argument(
-        "--out", default="evals/artifacts/context-compression-v1-report.json"
+        "--out", default="evals/artifacts/context-compression-v2-report.json"
     )
     parser.add_argument("--tasks-budget", type=int, default=5)
     parser.add_argument("--reviews-budget", type=int, default=2)
@@ -212,36 +236,72 @@ def main() -> int:
         for line in Path(args.dataset).read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    per_case = [run_case(case, budgets) for case in cases]  # noqa: ASYNC240
+    per_case = [run_case(case, budgets) for case in cases]
+
     summary: dict[str, object] = {
+        "report_version": "v2",
+        "v1_caveat": (
+            "v1 (context-compression-v1-report.json) scored retention "
+            "against text the model never received (summary_sources) "
+            "under an unspecified ordering contract; its retention "
+            "numbers are invalid, retained for the record only."
+        ),
         "dataset": Path(args.dataset).name,
         "budgets": budgets,
-        "metric_definitions": "docs/standards/metric-registry.md (v1, frozen 2026-08-31)",
-        "token_counting": (
-            "estimate (conservative CJK/Latin estimator); NOT exact, NOT provider usage"
+        "budget_semantics": (
+            "recent and relevant_summary optimize the SAME final input "
+            "budget (summaries included in the shrink loop)"
         ),
+        "token_counting": (
+            "estimate (conservative CJK/Latin heuristic); NOT exact "
+            "tokenizer; NOT provider usage"
+        ),
+        "scoring_rule": "evals/context_metrics.py (frozen v2, pre-registered)",
         "case_count": len(cases),
-        "strategies": STRATEGIES,
+        "offline_limitation": (
+            "no real embeddings in the offline relevance arm — results "
+            "validate branch logic only, not semantic recall quality"
+        ),
     }
     for strategy in STRATEGIES:
-        reductions = [c[strategy]["input_token_reduction"] for c in per_case]
-        retentions = [
-            c[strategy]["required_fact_retention"]
-            for c in per_case
-            if c[strategy]["required_fact_retention"] is not None
+        rows = [c[strategy] for c in per_case]
+        reductions = [r["input_token_reduction"] for r in rows]
+        total = sum(r["facts_total"] for r in rows)
+        retained = sum(r["facts_retained"] for r in rows)
+        needs_review = sum(r["facts_needs_review"] for r in rows)
+        macro = [
+            r["fact_retention_macro"]
+            for r in rows
+            if r["fact_retention_macro"] is not None
         ]
         summary[strategy] = {
-            "mean_input_token_reduction": round(sum(reductions) / len(reductions), 4),
-            "mean_required_fact_retention": (
-                round(sum(retentions) / len(retentions), 4) if retentions else None
+            "mean_input_token_reduction": round(
+                sum(reductions) / len(reductions), 4
             ),
-            "over_budget_cases": sum(1 for c in per_case if c[strategy]["over_budget"]),
+            "fact_retention_macro_mean": (
+                round(sum(macro) / len(macro), 4) if macro else None
+            ),
+            "fact_retention_micro": (
+                {
+                    "retained": retained,
+                    "needs_review": needs_review,
+                    "lost": total - retained - needs_review,
+                    "total": total,
+                    "denominator": "all annotated facts across cases",
+                }
+                if total
+                else None
+            ),
+            "over_budget_cases": sum(1 for r in rows if r["over_budget"]),
         }
+
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(
-            {"summary": summary, "per_case": per_case}, ensure_ascii=False, indent=2
+            {"summary": summary, "per_case": per_case},
+            ensure_ascii=False,
+            indent=2,
         )
         + "\n",
         encoding="utf-8",

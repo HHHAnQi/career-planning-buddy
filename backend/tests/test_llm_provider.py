@@ -306,3 +306,46 @@ async def test_real_adapter_runs_through_graph_and_persists_safe_metadata(
     assert plan is not None
     assert plan.metadata_json["provider"] == "openai_compatible"
     assert plan.metadata_json["model_id"] == "provider-model-id"
+
+
+def test_input_budget_gate_refuses_request_before_sending() -> None:
+    import asyncio
+    """四.4: the compressed CONTEXT may fit its own budget while the final
+    request (system prompt + output schema + context) exceeds the per-call
+    limit — the provider must refuse BEFORE any HTTP traffic, keeping the
+    failure explicit instead of silently trimming constraints."""
+    import httpx
+    import pytest
+
+    from app.agent.errors import InputBudgetExceededError
+    from app.providers.llm import OpenAICompatiblePlanningProvider
+    from tests.test_agent_nodes import candidate
+
+    calls = {"count": 0}
+
+    def counting_transport(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(200, json={"id": "x", "choices": [{"message": {"content": "{}"}}]})
+
+    plan_candidate, context = candidate()
+    provider = OpenAICompatiblePlanningProvider(
+        api_key="k",
+        base_url="https://example.invalid",
+        model="m",
+        transport=counting_transport,
+        # The rendered request for this fixture is ~1900 estimated tokens;
+        # a 500-token ceiling forces the schema+system overflow while the
+        # bare context would easily fit a 500-token compression budget.
+        max_input_tokens=500,
+    )
+
+    with pytest.raises(InputBudgetExceededError):
+        asyncio.run(
+            provider.generate_plan(
+                message="帮我制定求职计划",
+                context=context,
+                replan_mode=ReplanMode.INITIAL,
+                evidence_catalog=[],
+            )
+        )
+    assert calls["count"] == 0, "no provider traffic may occur after refusal"

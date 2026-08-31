@@ -393,7 +393,12 @@ class FixedPlanningGraph:
         applies three-stage compression, and persists the input snapshot."""
 
         async def merge() -> NodeOutput[
-            tuple[PlanningContext, list[EvidenceCatalogItem], PlanningContext]
+            tuple[
+                PlanningContext,
+                list[EvidenceCatalogItem],
+                PlanningContext,
+                bool,
+            ]
         ]:
             profile = state["profile"]
             intent = state["intent"]
@@ -521,7 +526,7 @@ class FixedPlanningGraph:
                         session, state["run_id"], snapshot
                     )
             return NodeOutput(
-                (context, evidence_catalog, authoritative),
+                (context, evidence_catalog, authoritative, compression.over_budget),
                 NodeTelemetry(
                     trace_data={
                         "token_estimate": context.token_estimate,
@@ -543,7 +548,12 @@ class FixedPlanningGraph:
                 ),
             )
 
-        context, evidence_catalog, authoritative = await self._nodes.run(
+        (
+            context,
+            evidence_catalog,
+            authoritative,
+            compression_over_budget,
+        ) = await self._nodes.run(
             state["run_id"],
             "context_builder",
             merge,
@@ -554,6 +564,7 @@ class FixedPlanningGraph:
             "evidence_catalog": evidence_catalog,
             "tool_round": 0,
             "tool_call_count": 0,
+            "compression_over_budget": compression_over_budget,
         }
 
     async def _agent_node(self, state: PlanningState) -> dict[str, object]:
@@ -1117,27 +1128,11 @@ class FixedPlanningGraph:
         total_usage: ProviderUsage | None = None
         stream_summaries: list[dict[str, object]] = []
         prompt_version = state["runtime_config"].prompt_versions["career_planning"]
-
-        # Final-render input accounting: ESTIMATED per-section sizes of the
-        # exact request text sent to the provider (system + rendered context
-        # + tool definitions). Distinguish from provider-reported usage
-        # (usage.tokens_in) — one is an estimate, the other the actual bill.
-        from app.prompts.career_planning import (
-            generation_messages,
-            rendered_input_estimate,
-        )
-
-        _input_estimate = rendered_input_estimate(
-            generation_messages(
-                message=state["request"].message,
-                context=context,
-                replan_mode=mode,
-                evidence_catalog=evidence_catalog,
-            ),
-            tools=[
-                {"name": spec.name, "description": spec.description}
-                for spec in self._tool_registry.available_specs()
-            ],
+        # Input accounting captured from the provider-returned payload
+        # (computed on the ACTUAL request inside the provider).
+        last_input_estimate: dict[str, int] = {}
+        compression_over_budget = bool(
+            state.get("compression_over_budget")
         )
 
         def _step_telemetry(visibility: EvidenceVisibility) -> NodeTelemetry:
@@ -1145,9 +1140,12 @@ class FixedPlanningGraph:
             # so total_usage is always bound by the time this runs.
             assert total_usage is not None
             telemetry = self._telemetry(total_usage, prompt_version, visibility)
-            telemetry.trace_data.update(
-                {f"input_{k}": v for k, v in _input_estimate.items()}
-            )
+            if last_input_estimate:
+                telemetry.trace_data.update(
+                    {f"input_{k}": v for k, v in last_input_estimate.items()}
+                )
+            if compression_over_budget:
+                telemetry.trace_data["compression_over_budget"] = True
             if stream_summaries:
                 telemetry.trace_data["llm_stream"] = stream_summaries
             return telemetry
@@ -1245,6 +1243,8 @@ class FixedPlanningGraph:
             usage = self._extract_usage(raw)
             self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
             total_usage = usage if total_usage is None else self._combine_usage(total_usage, usage)
+            if isinstance(raw, dict) and isinstance(raw.get("input_estimate"), dict):
+                last_input_estimate = dict(raw.pop("input_estimate"))
             try:
                 if using_plan_path:
                     response = ProviderPlanResponse.model_validate(raw)

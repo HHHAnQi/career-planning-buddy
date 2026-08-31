@@ -204,6 +204,19 @@ def compress_context_history(
             ),
         )
 
+    # Stable ordering contract: compression always evaluates recency on a
+    # newest-first sequence (scheduled_date desc, then original order as
+    # the tiebreak), matching the runtime repository's ordering. Callers
+    # may pass any order; the retained window is defined by THIS rule.
+    ordered_tasks = sorted(
+        enumerate(context.recent_tasks),
+        key=lambda pair: (-pair[1].scheduled_date.toordinal(), pair[0]),
+    )
+    ordered_context = context.model_copy(
+        update={"recent_tasks": [task for _, task in ordered_tasks]}
+    )
+    context = ordered_context
+
     retained_tasks, older_tasks, promoted = _select_retained_tasks(
         context.recent_tasks,
         recent_tasks_budget,
@@ -215,12 +228,35 @@ def compress_context_history(
     retained_reviews = context.recent_reviews[:recent_reviews_budget]
     older_reviews = context.recent_reviews[recent_reviews_budget:]
 
+    # Summaries are computed BEFORE the budget loop and participate in
+    # it, so both windowed strategies optimize toward the SAME final
+    # input budget (max_context_tokens) — window count parity alone is
+    # not token parity.
+    task_summary = (
+        _task_summary(older_tasks)
+        if strategy is CompressionStrategy.RELEVANT_SUMMARY
+        else None
+    )
+    review_summary = (
+        _review_summary(older_reviews)
+        if strategy is CompressionStrategy.RELEVANT_SUMMARY
+        else None
+    )
     shrink_steps = 0
     if max_context_tokens is not None:
         # Dynamic budget: shed recency headroom (never below the floor)
-        # until the serialized context fits the per-call input budget.
+        # until the serialized context — summaries included — fits the
+        # per-call input budget.
         while (
-            estimate_text_tokens(_preview(context, retained_tasks, retained_reviews))
+            estimate_text_tokens(
+                _preview(
+                    context,
+                    retained_tasks,
+                    retained_reviews,
+                    task_summary=task_summary,
+                    review_summary=review_summary,
+                )
+            )
             > max_context_tokens
             and (
                 len(retained_tasks) > _MIN_RETAINED_TASKS
@@ -228,17 +264,16 @@ def compress_context_history(
             )
         ):
             if len(retained_tasks) > _MIN_RETAINED_TASKS:
-                older_tasks = [retained_tasks.pop()] + older_tasks
+                shed = retained_tasks.pop()
+                older_tasks = [shed] + older_tasks
+                if task_summary is not None:
+                    task_summary = _task_summary(older_tasks)
             if len(retained_reviews) > _MIN_RETAINED_REVIEWS:
-                older_reviews = [retained_reviews.pop()] + older_reviews
+                shed_review = retained_reviews.pop()
+                older_reviews = [shed_review] + older_reviews
+                if review_summary is not None:
+                    review_summary = _review_summary(older_reviews)
             shrink_steps += 1
-
-    if strategy is CompressionStrategy.RELEVANT_SUMMARY:
-        task_summary = _task_summary(older_tasks)
-        review_summary = _review_summary(older_reviews)
-    else:
-        task_summary = None
-        review_summary = None
     summarized_deliverables = {task.deliverable.strip() for task in context.recent_tasks}
     completed_facts = [
         fact
@@ -315,13 +350,16 @@ def _preview(
     context: PlanningContext,
     retained_tasks: list[TaskContext],
     retained_reviews: list[ReviewContext],
+    *,
+    task_summary: str | None = None,
+    review_summary: str | None = None,
 ) -> str:
     preview = context.model_copy(
         update={
             "recent_tasks": retained_tasks,
             "recent_reviews": retained_reviews,
-            "task_history_summary": None,
-            "review_history_summary": None,
+            "task_history_summary": task_summary,
+            "review_history_summary": review_summary,
             "token_estimate": 0,
         }
     )

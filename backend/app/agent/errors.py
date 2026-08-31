@@ -95,3 +95,14 @@ def parse_retry_after(value: str | None) -> float | None:
         except (TypeError, ValueError, OverflowError):
             return None
     return max(0.0, seconds)
+
+
+class InputBudgetExceededError(AgentError):
+    """The FINAL rendered request exceeds the per-call input budget.
+
+    Raised BEFORE any provider call: the request is never sent when the
+    necessary payload (system prompt + schema + context) alone exceeds
+    the budget — an explicit status, never silent constraint deletion.
+    """
+
+    code = "INPUT_BUDGET_EXCEEDED"

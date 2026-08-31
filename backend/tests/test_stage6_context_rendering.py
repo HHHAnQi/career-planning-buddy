@@ -65,16 +65,18 @@ def _context() -> PlanningContext:
 def test_history_compression_keeps_recent_records_and_removes_duplicate_facts() -> None:
     result = compress_context_history(_context())
 
+    # Newest-first retention contract: the five LATEST scheduled records
+    # survive the window (fixture dates ascend, so task-9 is newest).
     assert [task.title for task in result.context.recent_tasks] == [
-        "task-0",
-        "task-1",
-        "task-2",
-        "task-3",
-        "task-4",
+        "task-9",
+        "task-8",
+        "task-7",
+        "task-6",
+        "task-5",
     ]
     assert len(result.context.recent_reviews) == 2
     assert result.context.task_history_summary is not None
-    assert "deliverable-6" in result.context.task_history_summary
+    assert "deliverable-4" in result.context.task_history_summary
     assert result.context.review_history_summary is not None
     assert result.context.completed_facts == []
     assert result.task_compressed_count == 5

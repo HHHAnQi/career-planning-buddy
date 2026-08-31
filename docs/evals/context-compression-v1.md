@@ -1,7 +1,69 @@
-# 上下文管理效果验证 · 离线批次报告（context-compression-v1）
+# 上下文管理效果验证 · 离线批次报告（v2 修订版）
 
-> 2026-08-31 ｜ 全部结果为**合成/离线**（零模型调用）｜ 指标口径预注册于
-> `docs/standards/metric-registry.md`（跑前冻结）｜ 真实模型效果**待验证**
+> 2026-08-31 v2 ｜ 全部结果为**合成/离线**（零模型调用）｜ v2 口径预注册于
+> `docs/standards/metric-registry.md` ｜ 真实模型效果**待验证**
+>
+> **v1 报告废止说明**：v1（本文件下方保留）存在两处已被审计证实的缺陷——
+> ① 保留率评分把未发送给模型的 summary_sources 来源清单计分；② 未定义
+> 排序契约（数据集旧→新 vs 运行时最新在前，recent 窗口取错方向）。v1 的
+> 保留率数字（recent 0.771 / relevant 1.00）**无效**，仅作过程记录。
+
+## v2 修正内容（对应审计六项指控，全部核实为真并修复）
+
+| # | 审计指控 | 修复 | 证据 |
+|---|---|---|---|
+| 1 | recent 取旧弃新（排序未定义） | 压缩内部按 scheduled_date desc 稳定排序（与运行时仓库一致），契约写入 docstring 与测试 | `test_windowed_strategies_share_the_same_budget`、stage6 契约测试更新 |
+| 2 | 评分计入未发送的来源清单 | v2 评分对象=模型实收窗口（retained records + summary lines）；summary_sources 仅溯源 | `evals/context_metrics.py` + `test_fact_only_in_source_list_is_lost` |
+| 3 | 窗口条数相同≠Token 预算相同 | 摘要参与收缩循环，两窗口策略优化**同一最终输入预算** | `context_compression.py` shrink 循环重构 |
+| 4 | over_budget 未进执行流 | provider 调用前预算闸门：估算在**真实请求**上计算（`input_estimate` 随 provider 结果返回，graph 不再二次渲染），超限抛 `INPUT_BUDGET_EXCEEDED` 拒绝发送；压缩层 over_budget 进 state 与 trace | `test_input_budget_gate_refuses_request_before_sending`（计数 transport 断言零流量） |
+| 5 | integrity=1.0 常量 | 真实链路测试：已完成事项被裁出模型输入后，重复安排它的候选经**真实 validate_candidate** 在三策略下全部被 RECENT_DUPLICATE 拒绝；覆盖边界（30 任务窗/20 事实截断）显式记录 | `test_validation_independence.py` |
+| 6 | live 脚本三缺陷 | 重写：历史（Plan+Task+Review）真实装载且断言进入输入快照；策略在建 Run **前**注入并断言冻结快照前后一致；CountingProvider 精确计数；候选从持久化行（weekly_focus_json/tasks）还原；逐 trial JSONL 落盘保留失败 | `test_context_compression_live_mock.py`（Mock 端到端全过） |
+
+## v2 离线结果（组件化评分，9 case × 3 策略）
+
+| 策略 | 输入降幅均值* | 事实保留（宏观/微观） | needs_review | over-budget |
+|---|---|---|---|---|
+| full | 0%（基线） | 17/17（未压缩，定义使然） | 0 | 1/9† |
+| recent | 9.3% | **0.630 / 12÷17** | 0 | 0/9 |
+| relevant_summary | 7.9% | **1.000 / 17÷17** | 0 | 1/9† |
+
+*估算口径（保守 CJK/Latin），非精确 tokenizer、非 provider 实际用量。
+†cc-budget-07（400 token 极限预算）：full 与 relevant_summary 显式超限
+（不裁剪、不静默）；真实执行链中该状态由调用前闸门拒绝发送。
+
+**结论边界（重要）**：离线相关性臂未使用真实 embedding（无向量）——上述
+差异只证明**分支逻辑**（近因窗口丢早而相关的事实；摘要折叠把它们保留在
+模型实收文本中），**不构成真实语义召回效果的证明**。分母=17 条标注事实，
+全部计入（无删例）；needs_review=0。
+
+**与 v1 的数字差异来源**：recent 0.771→0.630（排序修正使旧相关事实真正
+落出窗口）+ 评分修正；relevant 1.00→1.00 但语义变了（现在只对模型实收
+文本测得，v1 是被来源清单污染的巧合）。
+
+## 逐例数据与复现
+
+```bash
+cd backend
+python scripts/context_compression_eval.py     # v2 报告（逐例明细内含）
+python -m pytest tests/test_context_fact_retention.py                    tests/test_validation_independence.py                    tests/test_context_compression_live_mock.py   # 链路证明
+python scripts/context_compression_live.py --repetitions 3       # 需授权
+```
+
+逐例：`evals/artifacts/context-compression-v2-report.json`（每 case ×
+每策略：token 估算、事实判定明细含缺失原因、裁剪记录与原因、
+promoted/budget_shrink/over_budget 状态、branch_check）。
+输入快照与实验配置可核查点：Run 的 `config_snapshot_json
+.context_compression_strategy` + `input_snapshot_json`（live 路径断言）。
+
+## 待真实模型验证（未运行，不生成简历数字）
+
+实际 token 用量（provider 口径）、费用、生成质量、计划约束违规率。
+建议真实实验规模：9 case × 3 策略 × 3 重复 = 81 trial（约 81–160 次模型
+调用，视修复轮而定；交错执行；隔离用户；预计费用 < ¥2）。执行需明确授权。
+
+---
+
+# 以下为 v1 报告原文（已废止，仅存档）
 
 ## 1. 已有能力 / 缺口 / 修改文件（步 1 盘点结论）
 

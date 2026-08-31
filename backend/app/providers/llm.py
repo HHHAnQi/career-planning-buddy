@@ -106,6 +106,7 @@ class OpenAICompatiblePlanningProvider:
         reasoning: str = "off",
         client: LLMClient | None = None,
         streaming_enabled: bool = False,
+        max_input_tokens: int | None = None,
     ) -> None:
         if not api_key or not base_url or not model:
             raise ProviderConfigurationError(
@@ -115,6 +116,10 @@ class OpenAICompatiblePlanningProvider:
         self._max_output_tokens = max_output_tokens
         self._reasoning = "off" if reasoning == "off" else "auto"
         self._streaming_enabled = streaming_enabled
+        # Pre-call budget gate: the FINAL rendered request (system +
+        # schema + context + tools) must fit, else the call is refused
+        # BEFORE any provider traffic (explicit status, never silent).
+        self._max_input_tokens = max_input_tokens
         self._owns_client = client is None
         self._client = client or OpenAIChatLLMClient(
             api_key=api_key,
@@ -282,14 +287,28 @@ class OpenAICompatiblePlanningProvider:
         *,
         operation: str,
     ) -> Mapping[str, object]:
-        response = await self._complete_request(
-            self._request(operation=operation, messages=messages)
+        request = self._request(operation=operation, messages=messages)
+        # Input accounting is computed on the EXACT message/tool payload
+        # handed to the provider — never on a parallel re-render. These
+        # are ESTIMATES (conservative CJK/Latin heuristic); provider
+        # truth arrives as usage.tokens_in below.
+        from app.prompts.career_planning import rendered_input_estimate
+
+        input_estimate = rendered_input_estimate(
+            messages,
+            tools=[
+                {"name": t.name, "description": t.description}
+                for t in (request.tools or [])
+            ],
         )
+        self._enforce_input_budget(input_estimate)
+        response = await self._complete_request(request)
         usage = self._provider_usage(response)
         if response.content is None:
             return {
                 "_raw_text": "",
                 "usage": usage.model_dump(mode="json"),
+                "input_estimate": input_estimate,
             }
         try:
             candidate_object: object = json.loads(response.content)
@@ -297,11 +316,13 @@ class OpenAICompatiblePlanningProvider:
             return {
                 "_raw_text": response.content[:12000],
                 "usage": usage.model_dump(mode="json"),
+                "input_estimate": input_estimate,
             }
         if not isinstance(candidate_object, Mapping):
             return {
                 "_raw_text": response.content[:12000],
                 "usage": usage.model_dump(mode="json"),
+                "input_estimate": input_estimate,
             }
         candidate = {str(key): value for key, value in candidate_object.items()}
         # The business-repair prompt asks the model to classify the dominant
@@ -311,10 +332,25 @@ class OpenAICompatiblePlanningProvider:
         result: dict[str, object] = {
             "candidate": candidate,
             "usage": usage.model_dump(mode="json"),
+            "input_estimate": input_estimate,
         }
         if isinstance(violation_category, str) and violation_category.strip():
             result["violation_category"] = violation_category.strip()[:64]
         return result
+
+    def _enforce_input_budget(self, input_estimate: dict[str, int]) -> None:
+        from app.agent.errors import InputBudgetExceededError
+
+        limit = self._max_input_tokens
+        if limit is None:
+            return
+        total = input_estimate.get("estimate_total_tokens", 0)
+        if total > limit:
+            raise InputBudgetExceededError(
+                f"rendered request ~{total} tokens exceeds per-call budget "
+                f"{limit}; refusing to send (constraints are never dropped "
+                "to fit)"
+            )
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -1050,6 +1086,7 @@ def build_planning_provider(
         reasoning=settings.llm_planning_reasoning,
         client=client,
         streaming_enabled=settings.llm_streaming_enabled,
+        max_input_tokens=settings.agent_max_input_tokens_per_call,
     )
     if agent_variant == "direct_llm_v1":
         return DirectLLMPlanningProvider(provider)
