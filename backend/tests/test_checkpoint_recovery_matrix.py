@@ -11,7 +11,6 @@ Scenarios (N=1 each):
 """
 
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -19,14 +18,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-pytestmark = pytest.mark.slow
-
 from app.agent.executor import AgentRunExecutor
 from app.core.config import get_settings
 from app.core.database import session_transaction
 from app.core.security import TokenService
 from app.core.time import product_today
-from app.models.agent_run import AgentRun, AgentStep
+from app.models.agent_run import AgentCheckpoint, AgentEvent, AgentRun, AgentStep
 from app.models.plan import Plan, Task
 from app.providers.llm import MockPlanningProvider
 from app.schemas.enums import CareerStage, GoalType, SkillLevel
@@ -34,6 +31,12 @@ from app.schemas.profile import ProfilePutRequest
 from app.services.agent_runs import AgentRunService
 from app.services.auth import AuthService
 from app.services.profiles import ProfileService
+
+pytestmark = pytest.mark.slow
+
+
+
+
 
 class _Noop:
     def submit(self, run_id):
@@ -89,7 +92,6 @@ async def _create_run(factory) -> tuple:
 
 async def _cleanup_run(factory, run_id) -> None:
     """Remove test-created runs to avoid polluting the shared test DB."""
-    from app.models.agent_run import AgentEvent
 
     async with factory() as session:
         for model in (AgentEvent, AgentStep, AgentCheckpoint, AgentRun):

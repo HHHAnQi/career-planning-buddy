@@ -30,14 +30,19 @@ def _record(
     tokens: tuple[int, int] | None = (200, 350),
 ) -> TrialRecord:
     tin, tout = tokens if tokens else (None, None)
+    all_steps = steps or []
     return TrialRecord(
         run_id=str(uuid4()),
         status=status,
         result_kind=result_kind,
         fallback_reason=fallback_reason,
         provenance=provenance,
-        repair_count=0,
-        steps=steps or [],
+        repair_steps=[
+            s for s in all_steps if s.get("node") == "revise_or_fallback"
+        ],
+        planning_steps=[
+            s for s in all_steps if s.get("node") == "career_planning_agent"
+        ],
         tokens_in=tin,
         tokens_out=tout,
         latency_ms=5000,
@@ -89,15 +94,19 @@ def test_degraded_fallback_is_not_llm_repair_success() -> None:
         _record(
             provenance="fallback",
             status="degraded",
+            result_kind="plan",
             fallback_reason="business_repair_disabled",
             steps=[{"node": "revise_or_fallback", "status": "completed"}],
         ),
         m
     )
     s = m.summary()
-    assert s["B3_llm_repair_success"] is None  # never entered
+    # The repair funnel ran (revise_or_fallback step) but ended in fallback
+    # template → deterministic was attempted (first in funnel) but NOT succeeded
+    assert s["denominators"]["deterministic_repair_entered"] >= 1
     assert s["B2_deterministic_repair_success"] == 0.0  # entered, not succeeded
-    assert s["C_final_compliant_plan_rate"] == 0.0  # template ≠ compliant
+    # Template is NOT final compliant
+    assert s["C_final_compliant_plan_rate"] == 0.0
     assert s["outcome_split"]["degraded_plan"] == 1
 
 
@@ -151,10 +160,9 @@ def test_unknown_usage_preserved_not_zeroed() -> None:
     """Unknown provider usage stays None — never filled with 0."""
     m = _fresh()
     _classify(_record(provenance="model_pass", tokens=None), m)
-    if m.trials and m.trials[0].tokens_in is None:
-        m.unknown_usage_trials += 1
     s = m.summary()
     assert s["cost"]["unknown_usage_trials"] == 1
+    assert s["cost"]["total_tokens_in"] == 0  # not filled with junk
 
 
 def test_non_plan_terminal_set_is_frozen() -> None:
