@@ -110,6 +110,10 @@ class ScriptedProvider:
         self.format_repair_calls = 0
         self.business_repair_calls = 0
         self.all_calls: list[dict[str, Any]] = []
+        # Per-request records (compatible with the real provider's
+        # request_records that NodeRunner reads for usage preservation).
+        self.request_records: list[dict[str, Any]] = []
+        self.sent_request_count = 0
 
     # --- Helpers for constructing script entries ---
     @staticmethod
@@ -177,9 +181,10 @@ class ScriptedProvider:
     async def generate_plan(self, *args, **kwargs) -> Any:
         self.plan_calls += 1
         self.all_calls.append({"method": "generate_plan", "call": self.plan_calls})
-        return self._dispatch(
+        result = await self._dispatch_with_record(
             self._plan, self.plan_calls, "generate_plan", kwargs
         )
+        return result
 
     async def generate_agent_turn(self, *args, **kwargs) -> Any:
         return await self.generate_plan(*args, **kwargs)
@@ -189,7 +194,7 @@ class ScriptedProvider:
         self.all_calls.append(
             {"method": "repair_format", "call": self.format_repair_calls}
         )
-        return self._dispatch(
+        return await self._dispatch_with_record(
             self._format, self.format_repair_calls, "repair_format", kwargs
         )
 
@@ -198,9 +203,28 @@ class ScriptedProvider:
         self.all_calls.append(
             {"method": "repair_business_rules", "call": self.business_repair_calls}
         )
-        return self._dispatch(
+        return await self._dispatch_with_record(
             self._business, self.business_repair_calls, "repair_business_rules", kwargs
         )
+
+    async def _dispatch_with_record(
+        self, script: list[Any], call_num: int, method: str,
+        kwargs: dict | None = None,
+    ) -> Any:
+        """Dispatch and record the request (for usage preservation)."""
+        self.sent_request_count += 1
+        result = self._dispatch(script, call_num, method, kwargs)
+        # Extract usage if available
+        tokens_in = 0
+        if isinstance(result, dict):
+            usage = result.get("usage", {})
+            tokens_in = usage.get("tokens_in", 0) if isinstance(usage, dict) else 0
+        self.request_records.append({
+            "operation": method,
+            "estimate_total_tokens": tokens_in,
+            "sent": True,
+        })
+        return result
 
     def _dispatch(
         self, script: list[Any], call_num: int, method: str,
@@ -213,8 +237,13 @@ class ScriptedProvider:
             if callable(entry):
                 return entry(kwargs or {})
             return entry
-        # Default: return a valid response computed from the actual context
-        return self.valid()
+        # Script exhausted: FAIL LOUDLY — an unexpected provider call
+        # must never silently return a default valid response.
+        raise RuntimeError(
+            f"ScriptedProvider: unexpected {method} call #{call_num}; "
+            f"script has {len(script)} entries. This means the graph "
+            f"called {method} more times than the test programmed."
+        )
 
     # Stub other methods the executor might call
     async def aclose(self) -> None:

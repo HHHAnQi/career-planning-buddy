@@ -41,6 +41,8 @@ def _record(
         tokens_in=tin,
         tokens_out=tout,
         latency_ms=5000,
+        format_repair_tokens_in=0,
+        format_repair_tokens_out=0,
     )
 
 

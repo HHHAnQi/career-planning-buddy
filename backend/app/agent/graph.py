@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import timedelta
 from hashlib import sha256
+from typing import Any
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
@@ -569,11 +570,38 @@ class FixedPlanningGraph:
         }
 
     async def _agent_node(self, state: PlanningState) -> dict[str, object]:
+        async def _operation_with_stages(
+        step_id: UUID,
+    ) -> NodeOutput[
+        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
+    ]:
+            try:
+                return await self._generate_candidate(state, step_id)
+            except BaseException as exc:
+                if not hasattr(exc, "_repair_stages"):
+                    exc._repair_stages = list(  # type: ignore[attr-defined]
+                        state.get("repair_stages") or []
+                    )
+                # Preserve known usage from the provider call(s) that
+                # succeeded before the exception — Run failure must not
+                # discard tokens already consumed.
+                inner = getattr(self._provider, "_inner", self._provider)
+                if hasattr(inner, "request_records"):
+                    sent = [r for r in inner.request_records if r.get("sent")]
+                    if sent:
+                        exc._known_usage = {  # type: ignore[attr-defined]
+                            "requests_sent": len(sent),
+                            "tokens_in": sum(
+                                r.get("estimate_total_tokens", 0) for r in sent
+                            ),
+                        }
+                raise
+
         candidate, evidence_catalog, visibility, tool_round, tool_call_count = (
             await self._nodes.run_with_step(
                 state["run_id"],
                 "career_planning_agent",
-                lambda step_id: self._generate_candidate(state, step_id),
+                _operation_with_stages,
             )
         )
         result: dict[str, object] = {
@@ -629,10 +657,24 @@ class FixedPlanningGraph:
         }
 
     async def _revise_node(self, state: PlanningState) -> dict[str, object]:
+        async def _operation_with_stages() -> Any:
+            """Wrap the operation so that ANY exception carries the
+            accumulated repair_stages — NodeRunner's fail_step reads
+            exc._repair_stages BEFORE the Run fails, ensuring stage
+            evidence is persisted in the step record even on failure."""
+            try:
+                return await self._revise_or_fallback(state)
+            except BaseException as exc:
+                if not hasattr(exc, "_repair_stages"):
+                    exc._repair_stages = list(  # type: ignore[attr-defined]
+                        state.get("repair_stages") or []
+                    )
+                raise
+
         candidate, fallback_reason, visibility = await self._nodes.run(
             state["run_id"],
             "revise_or_fallback",
-            lambda: self._revise_or_fallback(state),
+            _operation_with_stages,
             attempt=state.get("repair_count", 0) + 1,
         )
         return {
@@ -1146,6 +1188,7 @@ class FixedPlanningGraph:
     ]:
         format_repair_usage: list[dict[str, int]] = []
         context = state["planning_context"]
+        _total_usage_ref: list[ProviderUsage] = []  # mutable ref for exception handler
         mode = state["intent"].replan_mode
         evidence_catalog = list(state.get("evidence_catalog", []))
         tool_round = state.get("tool_round", 0)
@@ -1278,6 +1321,8 @@ class FixedPlanningGraph:
             usage = self._extract_usage(raw)
             self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
             total_usage = usage if total_usage is None else self._combine_usage(total_usage, usage)
+            _total_usage_ref.clear()
+            _total_usage_ref.append(total_usage)
             if isinstance(raw, dict) and isinstance(raw.get("input_estimate"), dict):
                 last_input_estimate = dict(raw.pop("input_estimate"))
             try:

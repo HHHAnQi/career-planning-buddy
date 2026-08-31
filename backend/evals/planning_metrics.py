@@ -37,13 +37,23 @@ QUERY = text(
               FROM agent_events e
              WHERE e.run_id = r.id AND e.event_type = 'run.provenance'
              ORDER BY e.sequence DESC LIMIT 1) AS provenance_payload,
+           (SELECT s.trace_data -> 'repair_stages'
+              FROM agent_steps s
+             WHERE s.run_id = r.id
+               AND s.status = 'failed'
+               AND s.trace_data ? 'repair_stages'
+             ORDER BY s.created_at DESC LIMIT 1) AS step_repair_stages,
            (SELECT json_agg(json_build_object(
                     'node', s.node_name,
                     'status', s.status,
                     'error_code', s.error_code,
                     'trace', s.trace_data,
                     'tokens_in', s.tokens_in,
-                    'tokens_out', s.tokens_out
+                    'tokens_out', s.tokens_out,
+                    'format_repair_tokens_in',
+                        (s.trace_data ->> 'format_repair_tokens_in')::int,
+                    'format_repair_tokens_out',
+                        (s.trace_data ->> 'format_repair_tokens_out')::int
                 ) ORDER BY s.created_at, s.sequence)
               FROM agent_steps s WHERE s.run_id = r.id) AS steps
     FROM agent_runs r
@@ -71,6 +81,8 @@ class TrialRecord:
     tokens_in: int | None
     tokens_out: int | None
     latency_ms: int
+    format_repair_tokens_in: int
+    format_repair_tokens_out: int
 
 
 @dataclass
@@ -101,6 +113,8 @@ class PlanningMetrics:
     unknown_usage_trials: int = 0
     planning_tokens: int = 0
     repair_tokens: int = 0
+    format_repair_tokens_in: int = 0
+    format_repair_tokens_out: int = 0
 
     trials: list[TrialRecord] = field(default_factory=list)
     missing_runs: list[str] = field(default_factory=list)
@@ -146,6 +160,8 @@ class PlanningMetrics:
                 "total_tokens_out": self.total_tokens_out,
                 "planning_tokens": self.planning_tokens,
                 "repair_tokens": self.repair_tokens,
+                "format_repair_tokens_in": self.format_repair_tokens_in,
+                "format_repair_tokens_out": self.format_repair_tokens_out,
                 "unknown_usage_trials": self.unknown_usage_trials,
                 "consistency_check": (
                     self.planning_tokens + self.repair_tokens
@@ -230,7 +246,13 @@ def _classify(record: TrialRecord, metrics: PlanningMetrics) -> None:
 
 
 def _accumulate_cost(record: TrialRecord, metrics: PlanningMetrics) -> None:
-    """Cost accumulation runs for EVERY trial, including failures."""
+    """Cost accumulation runs for EVERY trial, including failures.
+
+    Format repair tokens are read from the career_planning_agent step's
+    trace_data (format_repair_tokens_in/out) — recorded separately from
+    the step's total, which includes both planning and format repair.
+    Repair-node tokens are the full revise_or_fallback step totals.
+    """
     if record.tokens_in is None:
         metrics.unknown_usage_trials += 1
         return
@@ -238,12 +260,17 @@ def _accumulate_cost(record: TrialRecord, metrics: PlanningMetrics) -> None:
     tout = record.tokens_out or 0
     metrics.total_tokens_out += tout
 
-    # Split planning vs repair from step-level tokens
     for step in record.all_steps:
         node = step.get("node", "")
         step_tin = step.get("tokens_in") or 0
         if node == "career_planning_agent":
-            metrics.planning_tokens += step_tin
+            # Format repair tokens are recorded SEPARATELY in the step
+            # trace; subtract them to get pure planning tokens.
+            fmt_tin = step.get("format_repair_tokens_in") or 0
+            metrics.planning_tokens += step_tin - fmt_tin
+            metrics.format_repair_tokens_in += fmt_tin
+            fmt_tout = step.get("format_repair_tokens_out") or 0
+            metrics.format_repair_tokens_out += fmt_tout
         elif node == "revise_or_fallback":
             metrics.repair_tokens += step_tin
 
@@ -285,8 +312,26 @@ async def collect(
             repair_stages = payload.get("repair_stages") or []
             if not isinstance(repair_stages, list):
                 repair_stages = []
+            # Fallback: for FAILED Runs (no provenance event), read
+            # repair_stages from the failed step's trace_data — this is
+            # the issue-A persistence mechanism.
+            if not repair_stages and row.step_repair_stages:
+                step_stages = row.step_repair_stages
+                if isinstance(step_stages, list):
+                    repair_stages = step_stages
 
             steps = row.steps or []
+            # Sum format repair tokens from planning-agent step traces
+            fmt_tin = sum(
+                (st.get("format_repair_tokens_in") or 0)
+                for st in steps
+                if st.get("node") == "career_planning_agent"
+            )
+            fmt_tout = sum(
+                (st.get("format_repair_tokens_out") or 0)
+                for st in steps
+                if st.get("node") == "career_planning_agent"
+            )
             record = TrialRecord(
                 run_id=rid,
                 status=row.status,
@@ -298,6 +343,8 @@ async def collect(
                 tokens_in=row.total_tokens_in,
                 tokens_out=row.total_tokens_out,
                 latency_ms=row.total_latency_ms,
+                format_repair_tokens_in=fmt_tin,
+                format_repair_tokens_out=fmt_tout,
             )
             _classify(record, metrics)
     finally:

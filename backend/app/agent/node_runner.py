@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from time import monotonic
-from typing import TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 from sqlalchemy import select
@@ -90,12 +90,24 @@ class NodeRunner:
         except BaseException as exc:
             code = self._error_code(exc)
             error_message = str(exc) if isinstance(exc, AgentError) else type(exc).__name__
+            # Stage evidence from the failed node (set by graph nodes
+            # via exc._repair_stages) is persisted even on failure.
+            stages = getattr(exc, "_repair_stages", None)
+            usage = getattr(exc, "_known_usage", None)
+            extra_trace: dict[str, Any] | None = None
+            if stages:
+                extra_trace = {"repair_stages": stages}
+            if usage:
+                if extra_trace is None:
+                    extra_trace = {}
+                extra_trace["known_usage"] = usage
             await self.fail_step(
                 run_id,
                 step.id,
                 latency_ms=int((monotonic() - started) * 1000),
                 error_code=code,
                 error_message=error_message,
+                extra_trace=extra_trace,
             )
             raise
         traced_latency = output.telemetry.trace_data.get("latency_ms")
@@ -224,12 +236,24 @@ class NodeRunner:
         except BaseException as exc:
             code = self._error_code(exc)
             error_message = str(exc) if isinstance(exc, AgentError) else type(exc).__name__
+            # Stage evidence from the failed node (set by graph nodes
+            # via exc._repair_stages) is persisted even on failure.
+            stages = getattr(exc, "_repair_stages", None)
+            usage = getattr(exc, "_known_usage", None)
+            extra_trace: dict[str, Any] | None = None
+            if stages:
+                extra_trace = {"repair_stages": stages}
+            if usage:
+                if extra_trace is None:
+                    extra_trace = {}
+                extra_trace["known_usage"] = usage
             await self.fail_step(
                 run_id,
                 step.id,
                 latency_ms=int((monotonic() - started) * 1000),
                 error_code=code,
                 error_message=error_message,
+                extra_trace=extra_trace,
             )
             raise
         traced_latency = output.telemetry.trace_data.get("latency_ms")
@@ -327,6 +351,7 @@ class NodeRunner:
         latency_ms: int,
         error_code: str,
         error_message: str,
+        extra_trace: dict[str, object] | None = None,
     ) -> None:
         async with self._session_factory() as session:
             async with session_transaction(session):
@@ -343,7 +368,7 @@ class NodeRunner:
                     step,
                     status="failed",
                     latency_ms=latency_ms,
-                    trace_data={},
+                    trace_data=extra_trace or {},
                     error_code=error_code,
                     error_message=error_message,
                 )
