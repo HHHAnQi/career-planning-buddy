@@ -39,6 +39,9 @@ embedding = [
 packages = ["app"]
 
 [tool.pytest.ini_options]
+markers = [
+    "slow: dispatcher-based tests that need real polling time; run individually",
+]
 addopts = "-ra -p no:cacheprovider"
 asyncio_mode = "auto"
 testpaths = ["tests"]

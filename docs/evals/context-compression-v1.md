@@ -17,11 +17,17 @@
 
 ## v3 离线结果（11 case × 21 标注事实，含 2 独立留出）
 
-| 策略 | 降幅（全样本） | 事实保留（全样本） | 保留（可发送样本†） |
+<!-- AUTO-TABLE:BEGIN -->
+| 策略 | 降幅（全样本） | 事实保留（全样本） | 保留（可发送样本） |
 |---|---|---|---|
-| full | 0% | 21/21 | 19/19 |
-| recent | 8.8% | **15/21**（留出集 2 条因数字精确匹配判失） | 13/17 |
-| relevant_summary | 7.5% | **21/21** | 19/19 |
+| full | 0.0% | **21/21** | **19/19** |
+| recent | 8.8% | **15/21** | **14/19** |
+| relevant_summary | 7.5% | **21/21** | **19/19** |
+<!-- AUTO-TABLE:END -->
+
+> 本表由 `scripts/generate_context_report_table.py` 从 v3 JSON 工件自动生成，
+> 禁止手工编辑；一致性测试 `test_report_table_consistency` 断言文档与工件
+> 逐格相等。
 
 †可发送 = 最终请求未超预算（cc-budget-07 在 full 与 relevant_summary 下
 显式超限：context 级与请求级均置位，真实链路由发送边界拒绝）。

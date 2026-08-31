@@ -147,9 +147,35 @@ def run_case(case: dict, budgets: dict[str, int]) -> dict[str, object]:
         "".join(m["content"] for m in rendered_full)
     )
 
+    # Layer 1: source complete history (all dataset rows, untruncated)
+    source_task_count = len(case["history"]["tasks"])
+    source_review_count = len(case["history"].get("reviews", []))
+    source_estimate = estimate_text_tokens(
+        json.dumps(case["history"], ensure_ascii=False)
+    )
+    # Layer 2: loaded history — bounded by the loader's 30-task window
+    # (any case with >30 tasks would lose rows at load; current dataset
+    # max is 12, so loaded == source, but the boundary is explicit).
+    loaded_task_count = min(source_task_count, 30)
+    loaded_review_count = min(source_review_count, 7)
+
     rows: dict[str, object] = {
         "case_id": case["case_id"],
         "scenario": case["scenario"],
+        "history_layers": {
+            "source": {
+                "tasks": source_task_count,
+                "reviews": source_review_count,
+                "estimated_tokens": source_estimate,
+            },
+            "loaded": {
+                "tasks": loaded_task_count,
+                "reviews": loaded_review_count,
+                "loader_boundary": "recent_tasks limit=30, reviews limit=7",
+                "load_stage_loss": source_task_count - loaded_task_count,
+            },
+            # Layer 3 (model_visible) is per-strategy below.
+        },
     }
     for strategy in STRATEGIES:
         result = _compress(context, budgets, request, strategy, max_tokens)
@@ -174,6 +200,10 @@ def run_case(case: dict, budgets: dict[str, int]) -> dict[str, object]:
         retained = verdicts.count("retained")
         needs_review = verdicts.count("needs_review")
         rows[strategy] = {
+            # Layer 3: model-visible input after compression.
+            "model_visible_tasks": len(result.context.recent_tasks),
+            "compression_stage_loss": source_task_count
+            - len(result.context.recent_tasks),
             "estimated_context_tokens": tokens,
             "estimated_final_request_tokens": final_estimate[
                 "estimate_total_tokens"
@@ -231,7 +261,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default=str(DATASET))
     parser.add_argument(
-        "--out", default="evals/artifacts/context-compression-v3-report.json"
+        "--out", default="evals/artifacts/context-compression-v3-report.json"  # noqa: E501
     )
     parser.add_argument("--tasks-budget", type=int, default=5)
     parser.add_argument("--reviews-budget", type=int, default=2)
