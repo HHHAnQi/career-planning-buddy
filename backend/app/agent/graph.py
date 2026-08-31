@@ -201,6 +201,7 @@ class FixedPlanningGraph:
         with tracing_context(enabled=False):
             await self._graph.ainvoke(state)
 
+
     def _build_graph(
         self,
     ) -> CompiledStateGraph[PlanningState, None, PlanningState, PlanningState]:
@@ -603,6 +604,25 @@ class FixedPlanningGraph:
             ),
             attempt=attempt,
         )
+        # Deferred LLM repair success: the validator confirms business
+        # rules on a candidate whose provenance is llm_repair. Only now
+        # can we say the repair "succeeded" (passed rules, not just parse).
+        if validation.passed and state.get("plan_provenance") == "llm_repair":
+            stages = state.get("repair_stages") or []
+            has_returned = any(
+                st.get("stage") == "llm_repair"
+                and st.get("action") == "returned"
+                for st in stages
+            )
+            has_succeeded = any(
+                st.get("stage") == "llm_repair"
+                and st.get("action") == "succeeded"
+                for st in stages
+            )
+            if has_returned and not has_succeeded:
+                stages.append(
+                    {"stage": "llm_repair", "action": "succeeded"}
+                )
         return {
             "validation_report": validation,
             "validation_attempt": attempt,
@@ -1124,6 +1144,7 @@ class FixedPlanningGraph:
     ) -> NodeOutput[
         tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
     ]:
+        format_repair_usage: list[dict[str, int]] = []
         context = state["planning_context"]
         mode = state["intent"].replan_mode
         evidence_catalog = list(state.get("evidence_catalog", []))
@@ -1151,6 +1172,15 @@ class FixedPlanningGraph:
                 )
             if compression_over_budget:
                 telemetry.trace_data["compression_over_budget"] = True
+            # Cost attribution: format repair tokens recorded separately
+            # so collect() can split planning vs format-repair cost.
+            if format_repair_usage:
+                telemetry.trace_data["format_repair_tokens_in"] = sum(
+                    u["tokens_in"] for u in format_repair_usage
+                )
+                telemetry.trace_data["format_repair_tokens_out"] = sum(
+                    u["tokens_out"] for u in format_repair_usage
+                )
             if stream_summaries:
                 telemetry.trace_data["llm_stream"] = stream_summaries
             return telemetry
@@ -1286,6 +1316,16 @@ class FixedPlanningGraph:
                     repair_usage.tokens_out,
                 )
                 total_usage = self._combine_usage(total_usage, repair_usage)
+                # Track format repair tokens separately for cost attribution
+                # (issue 3: format repair happens inside career_planning_agent;
+                # without this, its cost is indistinguishable from planning).
+                format_repair_usage.append(
+                    {
+                        "tokens_in": repair_usage.tokens_in,
+                        "tokens_out": repair_usage.tokens_out,
+                        "latency_ms": repair_usage.latency_ms,
+                    }
+                )
                 prompt_version = state["runtime_config"].prompt_versions["format_repair"]
                 try:
                     response = ProviderPlanResponse.model_validate(repaired)
@@ -1451,6 +1491,9 @@ class FixedPlanningGraph:
                 state.get("authoritative_context") or context,
             )
             if recheck.passed:
+                state["repair_stages"].append(
+                    {"stage": "deterministic_repair", "action": "succeeded"}
+                )
                 _, visibility = build_evidence_visibility(
                     call_id=f"{state['run_id']}:deterministic_repair",
                     evidence_catalog=list(state.get("evidence_catalog", [])),
@@ -1467,6 +1510,7 @@ class FixedPlanningGraph:
                 call_id=f"{state['run_id']}:business_budget_fallback",
                 evidence_catalog=[],
             )
+            state["plan_provenance"] = "fallback"
             return NodeOutput(
                 (fallback, "business_repair_budget_insufficient", visibility)
             )
@@ -1476,6 +1520,7 @@ class FixedPlanningGraph:
                 call_id=f"{state['run_id']}:business_fallback",
                 evidence_catalog=[],
             )
+            state["plan_provenance"] = "fallback"
             return NodeOutput((fallback, "business_repair_exhausted", visibility))
         repair_catalog, visibility = build_evidence_visibility(
             call_id=(
@@ -1523,6 +1568,7 @@ class FixedPlanningGraph:
                 call_id=f"{state['run_id']}:business_invalid_fallback",
                 evidence_catalog=[],
             )
+            state["plan_provenance"] = "fallback"
             return NodeOutput(
                 (fallback, "business_repair_invalid", fallback_visibility),
                 self._telemetry(
@@ -1531,8 +1577,11 @@ class FixedPlanningGraph:
                     visibility,
                 ),
             )
+        # "returned" = the repair output was parseable (NOT yet
+        # rule-compliant). "succeeded" is recorded by the validator node
+        # when business rules actually pass on this candidate.
         state["repair_stages"].append(
-            {"stage": "llm_repair", "action": "succeeded"}
+            {"stage": "llm_repair", "action": "returned"}
         )
         state["plan_provenance"] = "llm_repair"
         if response.violation_category is not None:
