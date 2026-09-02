@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "career-planning-buddy-backend"
+version = "0.1.0"
+description = "Career Planning Buddy FastAPI backend"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.14,<2",
+    "asyncpg>=0.30,<1",
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "langgraph>=0.6,<2",
+    "langsmith>=0.10,<1",
+    "pgvector>=0.3,<1",
+    "pypdf>=5,<7",
+    "pyjwt>=2.10,<3",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "python-multipart>=0.0.20,<1",
+    "sqlalchemy[asyncio]>=2.0.36,<3",
+    "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.14,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<1",
+    "ruff>=0.9,<1",
+]
+embedding = [
+    "sentence-transformers>=5.1,<6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: dispatcher-based tests that need real polling time; run individually",
+]
+addopts = "-ra -p no:cacheprovider"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ASYNC", "B", "E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+# Release scope decision (2026-08-29): strict typing is enforced on the
+# production package `app` (0 errors). tests/scripts/evals carry ~175
+# pre-existing strict-mode findings tracked as technical debt — widening
+# strict coverage back to them is a follow-up, not a release blocker.
+strict = true
+files = ["app"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true

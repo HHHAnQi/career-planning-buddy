@@ -1,0 +1,26 @@
+# Agent Run 状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: POST /agent-runs
+    pending --> running: executor starts
+    pending --> cancelled: user cancels
+    pending --> failed: startup recovery / scheduling error
+    running --> completed: normal plan persisted
+    running --> degraded: template plan / clarification / safe response
+    running --> failed: no usable result / deadline / unhandled error
+    running --> cancelled: user cancels
+    completed --> [*]
+    degraded --> [*]
+    failed --> [*]
+    cancelled --> [*]
+```
+
+## 终态约束
+
+- completed：`result_kind=plan` 且 `final_plan_id` 非空；
+- degraded：`result_kind` 必须是 plan/clarification/safe_response；
+- failed/cancelled：无 result_kind 和 final_plan_id；
+- 终态不可再次转移；
+- 每次终态变化必须写唯一 terminal event，且它是最后一个持久事件；
+- heartbeat 不属于持久事件，不影响 sequence。

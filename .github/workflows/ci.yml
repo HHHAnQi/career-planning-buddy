@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    env:
+      APP_GIT_COMMIT: ${{ github.sha }}
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: career_buddy_test
+          POSTGRES_USER: career_buddy
+          POSTGRES_PASSWORD: career_buddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U career_buddy -d career_buddy_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+
+      - name: Install locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.lock
+          python -m pip install --no-deps --editable .
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Mypy
+        run: python -m mypy app  # strict scope: production code (see pyproject note)
+
+      - name: Audit deployable configuration
+        run: python -m scripts.audit_config
+
+      - name: Evaluate intent routing contract
+        run: python -m scripts.evaluate_intent_router
+
+      - name: Upgrade database
+        env:
+          APP_ENV: test
+          DATABASE_URL: postgresql+asyncpg://career_buddy:career_buddy_test@localhost:5432/career_buddy_test
+          JWT_SECRET: ci-only-secret-with-at-least-32-characters
+          LLM_PROVIDER: mock
+          SEARCH_PROVIDER: mock
+          EMBEDDING_PROVIDER: mock
+        run: |
+          python -m alembic upgrade head
+          python -m alembic downgrade -1
+          python -m alembic upgrade head
+          python -m alembic check
+
+      - name: Validate Compose configuration
+        env:
+          EMBEDDING_MODEL_HOST_PATH: /tmp
+        run: |
+          docker compose --file ../compose.yaml config --quiet
+          docker compose --file ../compose.yaml --file ../compose.embedding.yaml config --quiet
+
+      - name: Build non-root backend image
+        run: |
+          docker build --tag career-planning-buddy-backend:ci .
+          test "$(docker image inspect --format '{{.Config.User}}' career-planning-buddy-backend:ci)" = app
+
+      - name: Pytest
+        env:
+          APP_ENV: test
+          DATABASE_URL: postgresql+asyncpg://career_buddy:career_buddy_test@localhost:5432/career_buddy_test
+          JWT_SECRET: ci-only-secret-with-at-least-32-characters
+          LLM_PROVIDER: mock
+          SEARCH_PROVIDER: mock
+          EMBEDDING_PROVIDER: mock
+        run: python -m pytest
+
+      - name: Offline Stage 5 Eval
+        env:
+          APP_ENV: test
+          DATABASE_URL: postgresql+asyncpg://career_buddy:career_buddy_test@localhost:5432/career_buddy_test
+          JWT_SECRET: ci-only-secret-with-at-least-32-characters
+          LLM_PROVIDER: mock
+          SEARCH_PROVIDER: mock
+          EMBEDDING_PROVIDER: mock
+        run: python -m scripts.run_eval --no-persist
+
+      - name: Deterministic Eval Harness V2 smoke
+        env:
+          APP_ENV: test
+          DATABASE_URL: postgresql+asyncpg://career_buddy:career_buddy_test@localhost:5432/career_buddy_test
+          JWT_SECRET: ci-only-secret-with-at-least-32-characters
+          LLM_PROVIDER: mock
+          SEARCH_PROVIDER: mock
+          EMBEDDING_PROVIDER: mock
+          EVAL_PROVIDER_MODE: mock
+        run: >-
+          python -m evals.v2 run --dataset stage5
+          --provider-mode mock --trial-count 1
+          --require-all-hard-gates
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

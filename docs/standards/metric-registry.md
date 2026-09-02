@@ -1,0 +1,104 @@
+# 指标注册表（Metric Registry）—— 预注册制度 v1
+
+> 制度起源：第二轮面试拷问 Q2。`memory_grounded` 指标在同一天内三次修改
+> 评分规则（bigram 比率 → 实体锚点 → 锚点+请求回声排除），每次都在看到
+> 数据之后——该轨迹被质疑为 metric fishing。本制度使"钓鱼"在流程上不可行。
+
+## 铁律
+
+1. **承载结论的指标必须先注册后使用**：定义、阈值、判定口径在跑实验前
+   冻结于本文件（附冻结日期）。
+2. **看过数据之后的任何改动自动标记 `post-hoc`**：post-hoc 版本不得用于
+   通过性 / 对比性结论，**除非在新采集的数据上完整重跑**。改动记录必须
+   写明动机（发现指标缺陷 vs 结果不好看——由第三方可复核的判据是：缺陷
+   是否在未看数据前可被推理出来）。
+3. 单一指标只承载单一主张；主张强于指标精度时，结论必须降级。
+
+## 注册指标
+
+| 指标 | 版本 | 冻结定义 | 阈值 | 状态 | 承载主张 |
+|---|---|---|---|---|---|
+| hard gate 通过率 | v1 | 六域 hard-gate grader 全过占比 | SLO ≥85% | ✅ 冻结 | 系统可用性 |
+| plan_provenance 五标签 | v1 | persist 节点产出路径事件，五互斥 | — | ✅ 冻结 | 模型/工程贡献拆分 |
+| memory_grounded | **v0.3-diagnostic** | 实体锚点（ASCII 词 + 非通用 CJK bigram，请求回声排除）≥2 或 bigram 比率 ≥0.10，通过 = 命中 ≥ 半数 planted memory | ≥50% | ⚠️ **诊断级**（不承载结论） | 仅方向性诊断 |
+| hybrid relevance | v1 | 0.5×bigram + 0.5×embedding 余弦 | 提升 ≥0.08 | ✅ 冻结（机制层已证） | 压缩相关性 |
+| Wilson 95% CI | v1 | `scripts/confidence_report.py` | 结论主张要求 CI 不跨 0 | ✅ 冻结 | 全部对比结论 |
+| rescue rate | v1 | llm_repair provenance 中硬门禁通过占比 | <5%/100 次 → 下线 | ✅ 冻结 | LLM 修复存废 |
+
+## memory_grounded 演进记录（反面教材，永久保留）
+
+| 版本 | 改动 | 动机 | 性质 |
+|---|---|---|---|
+| v0.1 | bigram 比率 ≥0.10 | 初版 | 预注册 |
+| v0.2 | +实体锚点 ≥2 | live-mem-02 计划已落地"JD 定制"策略但词面稀释（实测比率 0.074） | **post-hoc**（缺陷可复核：词面指标对短关键词记忆的结构性盲区） |
+| v0.3 | +请求回声排除 | OFF 臂假阳性（计划复述请求词汇得分） | **post-hoc** |
+| 结论 | 三版均未产出显著组间差异；v0.3 冻结为诊断级，**质量维度主张降级为"证据不足"**，由独立 judge 盲评（阴性）交叉印证 | | |
+
+## Planning 质量与成本指标 v1（2026-08-31 预注册，实现前冻结）
+
+| 指标 | 冻结定义 | 分母 | 备注 |
+|---|---|---|---|
+| A. planner_first_pass_compliance | 首次候选通过全部指定规则的试验数 / **应生成计划的试验数** | 含调用失败/无法解析（留在分母）；澄清、安全拒绝等不应生成计划的路径单独统计，不入分母 | provenance=model_pass 占比 |
+| B1. format_repair_success | 格式修复后可解析的试验数 / 实际进入格式修复的试验数 | 仅含发生格式修复的试验 | |
+| B2. deterministic_repair_success | 确定性修复后通过全部规则的试验数 / 实际进入确定性修复的试验数 | 仅含发生确定性修复的试验 | 模板降级不算成功 |
+| B3. llm_repair_success | LLM 修复后通过全部规则的试验数 / 实际进入 LLM 修复的试验数 | 仅含发生 LLM 修复调用且未被预算拒绝的试验 | 模板降级和安全终止不算 LLM 修复成功 |
+| C. final_compliant_plan_rate | 最终交付合规计划的试验数 / 应生成计划的试验数 | 同 A | 同时报告无计划/降级/运行失败 |
+| D. cost | 每次请求的操作类型、是否被预算拒绝、是否尝试发送、成功/失败、实际 provider usage 和耗时 | 每试验总成本 + 修复额外成本 | 实际用量未知保留 unknown；Mock 用量不充当真实 token/费用 |
+| 阶段转化 vs 独立对照 | 同一首次候选的修复前后转化 ≠ 独立 A/B 实验；独立对照需固定输入/规则/模型/生成并配对交错 | | |
+
+适用范围：Mock 或真实模型运行的 trial 级聚合；来源标记必须区分
+mock / fixture / live。
+
+## 上下文压缩对照指标 v3（2026-08-31 第三次注册；v2 之上叠加四项修正）
+
+在 v2 冻结规则之上，v3 变更（代码先冻结后运行，本条目同批补记）：
+① 数字判定改为 **digit-run 精确集合**（"30" 不得匹配 "130"，"2" 不得匹配
+"20"）；② 否定判定泛化（未X/没X 前缀）且**子句局部化**——同一摘要中 A 已完成、
+B 未完成不得跨对象泄漏；③ 评分证据只能来自**实际渲染请求的子句**（非重建
+字段）；④ 报告分**全样本**与**可发送样本**（最终请求未超预算）两口径，
+失败与超预算样本保留不删。
+反例测试：30→130、2→20、收到→未收到、混合状态摘要（11 项评分测试）。
+独立留出集：cc-holdout-10/11（数字否定敏感、混合状态）。
+
+## 上下文压缩对照指标 v2（2026-08-31 第二次预注册，替代 v1 口径）
+
+v1 口径作废原因（审计发现）：① 保留率评分把未发送给模型的 summary_sources
+来源清单计入；② 未定义排序契约（数据集旧→新 vs 运行时最新在前）。
+v2 冻结规则（`evals/context_metrics.py`，跑前注册）：
+
+- 评分对象 = 模型实收窗口（retained records + summary lines），
+  summary_sources 仅溯源；
+- 组件判定：数值精确匹配 / 状态否定不翻转 / 同一窗口内 ≥2 锚点 /
+  非通用 bigram 覆盖 ≥60%；覆盖 30–60% 且无数值状态矛盾 → **needs_review
+  （不计保留）**；
+- 排序契约：压缩内部按 scheduled_date desc 稳定排序（与运行时仓库一致）；
+- 预算语义：recent 与 relevant_summary 优化**同一最终输入预算**（摘要参与
+  收缩循环）；
+- 报告：宏平均 / 微观总量（分母=全部标注事实）/ needs_review 数分开。
+
+v1 报告（context-compression-v1-report.json）保留作过程记录，其保留率数字
+**无效**。
+
+## 上下文压缩对照指标（v1，2026-08-31 预注册，跑前冻结；已被 v2 取代）
+
+| 指标 | 冻结定义 | 阈值/口径 |
+|---|---|---|
+| `input_token_reduction` | (T_full − T_strategy)/T_full，T = estimate_text_tokens（保守 CJK/Latin 估算器）作用于 render_planning_context 渲染后的上下文段 | per-case + 均值；**估算口径，非精确 tokenizer、非 provider 实际用量** |
+| `required_fact_retention` | 标注 required_fact 的存活判定：出现在任一 retained record 文本中，**或**出现在 summary_sources 折叠来源清单中；锚点匹配复用 memory_grounded v0.3 的冻结锚点规则（ASCII 实体 + 非通用 CJK bigram ≥2，请求回声排除） | per-case 存活数/总数 |
+| `over_budget_rate` | 压缩结果 over_budget=True 的 case 占比（保留底线后仍超预算，显式状态） | 对照三策略 |
+| `authoritative_fact_integrity` | 不变式：validator 消费未压缩权威事实（completed_facts/recent_tasks 与压缩无关） | 必须 =1.0，违反即实现缺陷 |
+| `plan_constraint_violation_rate` | （**待验证**，需真实模型）validate_candidate(候选, 权威事实) 未全过的 case 占比 | 真实对照脚本产出 |
+
+对照设计：full / recent / relevant_summary 三策略；recent 与 relevant_summary
+使用**相同预算**（tasks=5, reviews=2）；其余配置冻结于 config snapshot。
+语义存活规则与 memory_grounded 共用同一冻结锚点实现（独立复核锚点）。
+
+## 预注册模板（新指标必填）
+
+```
+指标名 / 版本 / 冻结日期：
+定义（可执行代码位置）：
+阈值及依据：
+承载主张（一句话）：
+已知失效模式（诚实边界）：
+```

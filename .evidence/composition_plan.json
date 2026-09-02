@@ -1,0 +1,72 @@
+{
+  "plan_id": "careerbuddy-composition-plan-v1.4-hhhanqi-ownership-filtered",
+  "registry_ref": "careerbuddy-claim-registry-v1.1 (.evidence/claim_registry.json, 30 claims; C110 scoped ownership VERIFIED for HHHAnQi)",
+  "target_role": "Agent Engineer / AI Application Engineer",
+  "bullets": [
+    {
+      "bullet_id": "B1",
+      "primary_signal_id": "S04",
+      "claim_refs": [
+        "C007",
+        "C008",
+        "C017",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C008"
+      ],
+      "result_claim_ref": "C017",
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "evaluation_control_plane_and_integrity",
+      "text": "实现数据库承载的 Agent 评测控制平面（实验/trial/评分三级，数据集与运行时身份 sha256 冻结，mock/fixture/live 三种 provider 模式）：构建实验臂不变量在试验前后校验声明臂与真实轨迹一致，据此发现并修正“伪裸基线”（对照臂仍在接受确定性记忆预执行）；当前冻结版本 trial 级硬门禁通过率 88.9%（80/90，30 任务×3 次重跑，GLM-4.7 live，Wilson 95% CI [80.7, 93.9]），90 个匿名化 trial 与全量评分以 SHA256 清单生成公开证据包随仓库归档。"
+    },
+    {
+      "bullet_id": "B2",
+      "primary_signal_id": "S02",
+      "claim_refs": [
+        "C003",
+        "C019",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C003"
+      ],
+      "result_claim_ref": "C019",
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "deterministic_repair_and_attribution",
+      "text": "实现 Agent 确定性修复模块与修复归因：封闭规则集的代码修复作为 LLM 修复失败的工程兜底（深拷贝修补违规字段、修复失败再降级确定性模板），五级 provenance 标签（model_pass/deterministic_repair/llm_repair/format_repair/fallback）逐运行记录产出路径；公开证据包实测 79 个产出计划的运行中 55 个模型首过、12 个由确定性/格式修复兜底、2 个模板降级。"
+    },
+    {
+      "bullet_id": "B3",
+      "primary_signal_id": "S06",
+      "claim_refs": [
+        "C015",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C015"
+      ],
+      "result_claim_ref": null,
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "hybrid_rag_retrieval",
+      "text": "实现 PostgreSQL 混合检索管线：结构感知分块，pgvector HNSW 与 pg_trgm 词法双通道经 RRF(k=60) 融合，“宽召回窄重排”（召回 50 仅取 top-20 进重排器、重排器接收原始 query 而非同义扩展），并以相对可回答性门（top 分数不足即返回零结果）作为防幻觉契约——两条重排策略均由实测回归驱动修正。"
+    },
+    {
+      "bullet_id": "B4",
+      "primary_signal_id": "S02",
+      "claim_refs": [
+        "C111",
+        "C014",
+        "C110"
+      ],
+      "supporting_mechanism_claim_refs": [
+        "C111",
+        "C014"
+      ],
+      "result_claim_ref": null,
+      "ownership_claim_ref": "C110",
+      "coverage_slot": "resume_agent_deterministic_execution",
+      "text": "实现简历优化 Agent 的确定性执行与可审计上下文：域工具由运行时确定性编排（gap 分析+批量证据检索），模型输出的 claim 文本/跨度/工具调用 ID 以冻结字段重盖、证据集 bundle_hash 锚定防漂移；上下文候选经 RRF+MMR 去冗余选择，提示注入命中清零计分并记录排除原因，完整构建清单随运行持久化可复算。"
+    }
+  ]
+}

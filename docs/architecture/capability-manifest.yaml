@@ -1,0 +1,76 @@
+schema_version: 1
+release: agent-hardening-r2
+statuses:
+  - planned
+  - implemented
+  - verified_mock
+  - verified_fixture
+  - verified_live
+  - production_ready
+  - deprecated
+capabilities:
+  resume_agent_runtime:
+    status: verified_mock
+    scope: resume_optimization
+    evidence:
+      code: backend/app/agent/resume_optimization_graph.py
+      tests: backend/tests/test_resume_agent_r2_unit.py
+  resume_tool_consumption:
+    status: verified_mock
+    scope: all parsed resume claims
+    evidence:
+      code: backend/app/agent/resume_optimization_graph.py
+      tests: backend/tests/test_resume_agent_r2_unit.py
+  resume_context_hybrid_retrieval:
+    status: verified_mock
+    scope: lexical plus embedding fusion and diversity selection
+    evidence:
+      code: backend/app/agent/resume_context_selection.py
+      tests: backend/tests/test_resume_agent_r2_unit.py
+  resume_hitl_batch_apply:
+    status: verified_mock
+    scope: one immutable child version per accepted batch
+    evidence:
+      code: backend/app/services/resume_assessments.py
+      tests: backend/tests/test_interview_batch3.py; frontend/src/pages/MaterialsPage.test.tsx
+  resume_replay:
+    status: verified_fixture
+    scope: exact fixture replay, active-runtime candidate comparison and semantic diff
+    evidence:
+      code: backend/app/services/dev.py
+      tests: backend/tests/test_resume_agent_r2_unit.py
+  resume_failure_recovery:
+    status: verified_mock
+    scope: lease takeover reuses frozen context, Tool bundle and Provider checkpoints
+    evidence:
+      code: backend/app/harness/checkpoints.py; backend/app/agent/resume_optimization_graph.py
+      tests: backend/tests/test_resume_agent_r2_unit.py
+  resume_prompt_boundary:
+    status: verified_mock
+    scope: untrusted-data envelope, injection exclusion and evidence/source validators
+    evidence:
+      code: backend/app/prompts/resume_optimization.py; backend/app/agent/resume_optimization_nodes.py
+      tests: backend/tests/test_resume_agent_r2_unit.py
+  resume_eval_v2:
+    status: planned
+    scope: versioned offline dataset and persisted trials/grades
+    evidence:
+      code: backend/evals/v2
+      tests: none -- capability is intentionally not claimed as implemented
+    limitations:
+      - the existing resume-agent-v1 suite is deterministic diagnostic coverage only
+      - Resume Trials are not yet persisted through Experiment/Trial/Score and therefore no production quality gate is claimed
+  resume_diagnostic_eval:
+    status: verified_mock
+    scope: ten deterministic context, injection, evidence and faithfulness regression cases
+    evidence:
+      code: backend/evals/resume_runner.py
+      tests: command-level diagnostic run recorded in docs/implementation/resume-live-validation-r2.md
+  resume_live_provider:
+    status: implemented
+    scope: openai-compatible provider path
+    evidence:
+      code: backend/app/providers/resume_optimization.py
+      tests: docs/implementation/resume-live-validation-r2.md
+    limitations:
+      - live verification requires credentials, quota and an explicit acceptance run
