@@ -9,7 +9,7 @@ Career Planning Buddy is an evidence-grounded career coaching Agent for CS stude
 
 项目重点不在让模型自由发挥，而在于如何用受控工作流、状态机、快照、人工确认和离线评测，把 LLM 能力放进可验证的软件系统。
 
-## 30 秒读懂（写给 Agent Engineer / Agent Infra 面试官）
+## 30 秒读懂
 
 **1. 这是个什么 Agent？** 证据化求职教练 Agent：LangGraph 13 节点受控状态机
 （原生 fan-out/join 并行 + 有界修复环），把求职上下文变成可执行、可校验、
