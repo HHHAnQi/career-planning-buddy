@@ -78,19 +78,19 @@ AgentRun ── status / result_kind / tokens / cost / latency / fallback_reason
 
 ## 界面预览
 
-> 截图位置已预留。请将脱敏后的图片放入 [`docs/assets/screenshots/`](docs/assets/screenshots/README.md)，再按目录说明替换下面的占位内容。
+以下截图来自本地 Mock Provider 演示环境，使用虚构、脱敏数据生成。
 
 | 求职工作台 | 材料诊断 |
 |---|---|
-| _截图位：`workspace.png`_ | _截图位：`materials.png`_ |
+| <img src="docs/assets/screenshots/workspace.png" alt="Career Planning Buddy 求职工作台" width="100%"> | <img src="docs/assets/screenshots/materials.png" alt="Career Planning Buddy 材料诊断与改写建议" width="100%"> |
 
 | 模拟面试 | 面试报告 |
 |---|---|
-| _截图位：`interview-room.png`_ | _截图位：`interview-report.png`_ |
+| <img src="docs/assets/screenshots/interview-room.png" alt="Career Planning Buddy 模拟面试答题页面" width="100%"> | <img src="docs/assets/screenshots/interview-report.png" alt="Career Planning Buddy 面试报告" width="100%"> |
 
 | 开发者追踪 |
 |---|
-| _截图位：`developer-trace.png`_ |
+| <img src="docs/assets/screenshots/developer-trace.png" alt="Career Planning Buddy Agent 运行与决策轨迹" width="100%"> |
 
 ## 当前能力
 
