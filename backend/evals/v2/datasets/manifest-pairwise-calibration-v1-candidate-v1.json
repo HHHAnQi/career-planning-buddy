@@ -1,0 +1,1 @@
+{"case_schema_version": "pairwise-calibration-export/v1", "dataset_id": "pairwise-calibration-v1-candidate", "dataset_version": "v1", "manifest_version": "2", "pair_count": 23, "source_path": "v2/datasets/pairwise-calibration-v1-candidate.jsonl", "source_sha256": "ce6f824478b3104475caefc6b7eba976138fcc65dfcade590728d79a386805ed"}

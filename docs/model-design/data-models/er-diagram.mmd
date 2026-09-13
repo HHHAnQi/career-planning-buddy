@@ -1,0 +1,32 @@
+# 全局 ER 图
+
+```mermaid
+erDiagram
+    users ||--o| user_profiles : has
+    users ||--o{ plans : owns
+    users ||--o{ tasks : owns
+    users ||--o{ reviews : writes
+    users ||--o{ memories : owns
+    users ||--o{ memory_candidates : confirms
+    users ||--o{ agent_runs : starts
+
+    plans ||--o{ tasks : contains
+    plans ||--o{ reviews : reviewed_by
+    plans ||--o{ companion_messages : has
+    plans ||--o{ plans : replanned_from
+
+    tasks ||--o{ companion_messages : triggers
+    reviews ||--o{ companion_messages : triggers
+    reviews o|--o| agent_runs : starts_next_plan
+
+    agent_runs ||--o{ agent_steps : has
+    agent_runs ||--o{ agent_events : emits
+    agent_runs ||--o{ tool_calls : records
+    agent_steps ||--o{ tool_calls : invokes
+    agent_runs ||--o{ search_sources : collects
+    agent_runs ||--o| plans : produces
+
+    memory_candidates o|--o| memories : activates
+```
+
+字段以同目录各表 spec 为准，图只表达关系，不重复字段细节。

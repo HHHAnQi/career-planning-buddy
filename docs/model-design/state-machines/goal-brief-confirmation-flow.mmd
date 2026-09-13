@@ -1,0 +1,22 @@
+stateDiagram-v2
+    [*] --> ClarificationRequired: 关键信息不足
+    [*] --> AwaitingConfirmation: 信息足够或采用可见默认值
+    ClarificationRequired --> ClarificationRequired: 补充后仍不足
+    ClarificationRequired --> AwaitingConfirmation: 补充后足够
+    AwaitingConfirmation --> AwaitingConfirmation: 用户修改目标
+    AwaitingConfirmation --> Confirmed: 用户明确确认
+    ClarificationRequired --> Cancelled: 用户取消
+    AwaitingConfirmation --> Cancelled: 用户取消
+    Confirmed --> AgentRunPending: 同一事务创建 Run
+    AgentRunPending --> [*]
+    Cancelled --> [*]
+
+    note right of AwaitingConfirmation
+      LLM 只能抽取目标字段
+      不能代替用户确认
+    end note
+
+    note right of AgentRunPending
+      生成 1–8 周总体路线
+      展开滚动未来 7 天任务
+    end note

@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Calming 青绿 + 暖灰：契合"求职焦虑"语境，避免红绿对比刺激 */
+    --background: 80 16% 97%;
+    --foreground: 201 28% 16%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 200 25% 18%;
+
+    --primary: 174 66% 29%;
+    --primary-foreground: 180 50% 98%;
+
+    --secondary: 200 20% 94%;
+    --secondary-foreground: 200 25% 22%;
+
+    --muted: 200 16% 94%;
+    --muted-foreground: 198 11% 43%;
+
+    --accent: 170 35% 91%;
+    --accent-foreground: 200 30% 22%;
+
+    --destructive: 3 44% 49%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 200 18% 88%;
+    --input: 200 18% 88%;
+    --ring: 173 58% 39%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 200 25% 18%;
+
+    --radius: 1rem;
+  }
+
+  .dark {
+    --popover: 200 28% 14%;
+    --popover-foreground: 180 20% 92%;
+    --background: 200 30% 10%;
+    --foreground: 180 20% 92%;
+    --card: 200 28% 14%;
+    --card-foreground: 180 20% 92%;
+    --primary: 173 50% 45%;
+    --primary-foreground: 200 40% 8%;
+    --secondary: 200 20% 20%;
+    --secondary-foreground: 180 20% 90%;
+    --muted: 200 18% 20%;
+    --muted-foreground: 200 12% 65%;
+    --accent: 200 24% 22%;
+    --accent-foreground: 180 20% 90%;
+    --destructive: 12 55% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 200 18% 26%;
+    --input: 200 18% 26%;
+    --ring: 173 50% 45%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply overflow-x-hidden bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  button,
+  a,
+  input,
+  textarea,
+  [role="button"] {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    background: hsl(var(--accent));
+    color: hsl(var(--accent-foreground));
+  }
+}

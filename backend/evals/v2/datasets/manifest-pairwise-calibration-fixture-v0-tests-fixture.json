@@ -1,0 +1,9 @@
+{
+  "manifest_version": "2",
+  "dataset_id": "pairwise-calibration-fixture",
+  "dataset_version": "v0-tests-fixture",
+  "case_schema_version": "pairwise-calibration-export/v1",
+  "source_path": "v2/datasets/pairwise-calibration-fixture-v0-tests-fixture.jsonl",
+  "source_sha256": "dd299e2c177aabef31c2186f30efb5811466e6080e22758438ceb825db73255a",
+  "pair_count": 5
+}

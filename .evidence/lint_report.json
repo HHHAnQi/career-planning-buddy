@@ -1,0 +1,167 @@
+{
+  "generated_by": "scripts/claim_linter.py",
+  "registry_ref": "careerbuddy-claim-registry-v1.1 (.evidence/claim_registry.json)",
+  "plan_id": "careerbuddy-composition-plan-v1.1",
+  "bullets": [
+    {
+      "bullet_id": "B1",
+      "structural_verdict": "PASS",
+      "structural_violations": [],
+      "semantic_verdict": "PASS",
+      "semantic_atoms": [
+        {
+          "atom": "LangGraph 职业规划 Agent",
+          "type": "object",
+          "authorized_by": "C001",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "风险门/意图路由条件分流、图内并行 fan-out",
+          "type": "mechanism",
+          "authorized_by": "C001",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "预算约束有界修复回边（各至多一次）",
+          "type": "mechanism",
+          "authorized_by": "C001",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "节点内工具循环（上限/强制产出/并行保序/模板回退）",
+          "type": "mechanism",
+          "authorized_by": "C002",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "三级修复升级阶梯",
+          "type": "mechanism",
+          "authorized_by": "C003",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "五级 provenance 标签供评测拆分模型/工程贡献",
+          "type": "mechanism",
+          "authorized_by": "C003",
+          "verdict": "ENTAILED"
+        }
+      ],
+      "final_verdict": "PASS"
+    },
+    {
+      "bullet_id": "B2",
+      "structural_verdict": "PASS",
+      "structural_violations": [],
+      "semantic_verdict": "PASS",
+      "semantic_atoms": [
+        {
+          "atom": "Postgres 持久执行器（SKIP LOCKED/租约心跳/逐事务栅栏/恢复先抢租约）",
+          "type": "mechanism",
+          "authorized_by": "C004",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "DB 唯一索引兜底恰好一个终态事件",
+          "type": "mechanism",
+          "authorized_by": "C005",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "终结事务原子持久化/成本汇总/租约清理",
+          "type": "mechanism",
+          "authorized_by": "C005",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "证据可见性防幻觉持久化门",
+          "type": "mechanism",
+          "authorized_by": "C005",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "DB 权威 SSE + Last-Event-ID + 幂等协作取消(409)",
+          "type": "mechanism",
+          "authorized_by": "C006",
+          "verdict": "ENTAILED"
+        }
+      ],
+      "final_verdict": "PASS"
+    },
+    {
+      "bullet_id": "B3",
+      "structural_verdict": "PASS",
+      "structural_violations": [],
+      "semantic_verdict": "PASS",
+      "semantic_atoms": [
+        {
+          "atom": "DB 评测控制平面（三级/身份冻结/Wilson CI/三 provider 模式）",
+          "type": "object",
+          "authorized_by": "C007",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "arm invariants 前后校验声明臂与真实轨迹",
+          "type": "mechanism",
+          "authorized_by": "C008",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "发现伪裸基线并修正重跑",
+          "type": "outcome",
+          "authorized_by": "C008+C009",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "真裸基线 72.4%（21/29，bad-case 原始导出核验）",
+          "type": "metric",
+          "authorized_by": "C009 allowed_metrics + mandatory_scope（29 例/失败明细来源均已保留在文本）",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "换位归一/位置偏差/κ 对照双人金集/三态门未达标仅诊断",
+          "type": "mechanism",
+          "authorized_by": "C010",
+          "verdict": "ENTAILED"
+        }
+      ],
+      "final_verdict": "PASS"
+    },
+    {
+      "bullet_id": "B4",
+      "structural_verdict": "PASS",
+      "structural_violations": [],
+      "semantic_verdict": "PASS",
+      "semantic_atoms": [
+        {
+          "atom": "零 LLM 三级确定性压缩（救援/预算下限/摘要折叠）",
+          "type": "mechanism",
+          "authorized_by": "C013",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "RRF 融合 + 贪心 MMR 选择",
+          "type": "mechanism",
+          "authorized_by": "C014",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "注入命中清零 + exclusion_reason",
+          "type": "mechanism",
+          "authorized_by": "C014",
+          "verdict": "ENTAILED"
+        },
+        {
+          "atom": "清单持久化可复算（含渲染哈希/算法版本）",
+          "type": "mechanism",
+          "authorized_by": "C014",
+          "verdict": "ENTAILED"
+        }
+      ],
+      "final_verdict": "PASS"
+    }
+  ],
+  "plan_violations": [],
+  "plan_verdict": "PASS",
+  "final_verdict": "PASS",
+  "note": "Structural lint (script) + semantic entailment lint (agent protocol, claim-governance §5): all atoms ENTAILED; C009 mandatory scope (29-case denominator, bad-case provenance) retained verbatim in B3; no unauthorized metric/ownership/causal atoms; ownership UNRESOLVED so no leadership phrasing anywhere."
+}

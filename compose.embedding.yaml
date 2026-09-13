@@ -1,0 +1,10 @@
+services:
+  backend:
+    environment:
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_MODEL_PATH: /models/embedding
+    volumes:
+      - type: bind
+        source: ${EMBEDDING_MODEL_HOST_PATH:?set EMBEDDING_MODEL_HOST_PATH}
+        target: /models/embedding
+        read_only: true

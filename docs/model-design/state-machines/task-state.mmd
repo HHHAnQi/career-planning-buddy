@@ -1,0 +1,16 @@
+# Task 状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: plan persisted
+    pending --> in_progress: user starts
+    pending --> abandoned: user abandons
+    pending --> expired: scheduled date passed
+    in_progress --> completed: user completes
+    in_progress --> abandoned: user abandons
+    completed --> [*]
+    abandoned --> [*]
+    expired --> [*]
+```
+
+客户端不能主动设置 expired；由定时任务执行。

@@ -1,0 +1,26 @@
+# 意图路由
+
+```mermaid
+flowchart TD
+    A["User message"] --> R["risk_gate"]
+    R -->|"high risk"| S["safe_response + degraded"]
+    R -->|"safe"| F{"Server-forced replan<br/>with source plan?"}
+    F -->|"yes"| FR["replan + forced mode"]
+    F -->|"no"| Q{"Query-only rule?"}
+    Q -->|"yes"| U["Typed navigation<br/>journey or today"]
+    Q -->|"no"| D["Versioned bilingual rules<br/>message + source context + weak hint"]
+    D --> C{"Decision strength"}
+    C -->|"create"| CP["create_plan + initial"]
+    C -->|"continue"| RC["replan + continue"]
+    C -->|"adjust"| RA["replan + adjust"]
+    C -->|"ambiguous / source missing"| IC["Intent clarification<br/>intent_uncertain"]
+    CP --> P{"Profile complete?"}
+    RC --> P
+    RA --> P
+    P -->|"no"| PC["Profile clarification<br/>profile_incomplete"]
+    P -->|"yes"| G["Planning graph"]
+```
+
+当前运行路径不调用 LLM。`hint_intent` 只允许 `create_plan/replan` 且仅作为弱提示；服务端来源计划和 Review 决策优先。查询返回结构化页面导航，低置信度和缺失来源返回结构化澄清；这些分支都在进入规划模型前终止，因此不会为不明确请求生成计划。
+
+图中已经覆盖当前实现所需的活动分支；节点间没有复杂异步协作，因此不额外维护一张重复的时序图。未来如引入结构化模型路由器，它应放在“规则无法决定”与“意图澄清”之间，并复用同一输出契约和评测门槛。

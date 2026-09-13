@@ -1,0 +1,50 @@
+{
+  "experiment_id": "cd3eb74e-0448-49a2-bc04-2758a9318990",
+  "dataset": "stage5@v1",
+  "model": "glm-4.7",
+  "trials_completed": 90,
+  "hard_gate_passed": 80,
+  "hard_gate_rate": 0.8889,
+  "latency_p50_ms": 20432,
+  "latency_p95_ms": 28862,
+  "provenance_split": {
+    "no_plan_path": 21,
+    "model_pass": 55,
+    "deterministic_repair": 11,
+    "format_repair": 1,
+    "fallback": 2
+  },
+  "failing_trials": {
+    "live-mem-01#1": [
+      "tool.expected_match"
+    ],
+    "live-mem-01#2": [
+      "tool.expected_match"
+    ],
+    "repair-02#0": [
+      "task.allowed_run_status"
+    ],
+    "repair-02#1": [
+      "task.allowed_run_status"
+    ],
+    "repair-02#2": [
+      "task.allowed_run_status"
+    ],
+    "repair-04#0": [
+      "task.allowed_run_status"
+    ],
+    "repair-04#1": [
+      "task.allowed_run_status"
+    ],
+    "repair-04#2": [
+      "task.allowed_run_status"
+    ],
+    "replan-01#1": [
+      "task.allowed_run_status"
+    ],
+    "replan-05#2": [
+      "task.allowed_run_status"
+    ]
+  },
+  "notes": "user ids salted-hash anonymized; grades reproducible via scripts/confidence_report.py against the same experiment"
+}

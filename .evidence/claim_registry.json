@@ -1,0 +1,452 @@
+{
+  "registry_id": "careerbuddy-claim-registry-v1.1",
+  "source_scenario": "Independent audit of /Users/huanqi/Accompany Project/career-planning-buddy-ly (branch release-sync, audited 2026-08-29). Evidence mined from code, tests (incl. tests/evals_v2 46 files), raw eval artifacts (bad_cases JSONL, annotations JSONL, mock regression artifacts), alembic migrations, CI workflows, compose files and git history. README/docs/interview highlights treated as unverified input; project-self-retracted numbers rejected.",
+  "target_role": "Agent Engineer",
+  "claims": [
+    {
+      "claim_id": "C001",
+      "signal_id": "S01",
+      "claim_type": "mechanism",
+      "canonical_claim": "基于 LangGraph StateGraph 实现职业规划 Agent 的固定 13 节点拓扑：风险门与意图路由条件分流（高风险直达安全响应、澄清/导航短路）、记忆与证据加载的图内并行 fan-out 与 join、规划后接规则校验节点与有界修复回边；修复环由 BudgetGuard 约束（每次运行至多 1 次业务修复 + 1 次格式修复），且 fallback 候选不可再入修复。",
+      "mandatory_scope": ["backend/app/agent/graph.py 规划主图"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/agent/graph.py",
+        "backend/tests/test_agent_runtime.py",
+        "backend/tests/test_parallel_context_fanout.py"
+      ],
+      "prohibited_escalations": ["多智能体系统（单 Agent 图）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+运行时测试确认机制；无量化产物。文件引入作者为 lyyjsr（见 OWNERSHIP），措辞不含归属。",
+      "notes": "graph.py 内存在三组重复节点函数定义（合并残留死代码），面试被问到代码质量时需坦诚。"
+    },
+    {
+      "claim_id": "C002",
+      "signal_id": "S01",
+      "claim_type": "mechanism",
+      "canonical_claim": "工具循环内嵌于生成节点而非图拓扑：至多 3 轮 LLM 回合，受 max_tool_rounds/max_tool_calls 约束，耗尽后移除工具强制产出最终答案，再耗尽则回退确定性模板候选；工具调用支持节点内并行执行并保序；意图引用历史上下文时由运行时确定性预执行记忆检索（记忆证据在生成前注入目录）。",
+      "mandatory_scope": ["backend/app/agent/graph.py _generate_candidate_uncached 与工具目录"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/agent/graph.py",
+        "backend/app/tools/registry.py",
+        "backend/tests/test_parallel_tool_calls.py"
+      ],
+      "prohibited_escalations": [],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+并行工具调用测试确认。'模型自愿调用率约 11%'为代码注释中的实测值（COMMENT_ONLY），不入 canonical。",
+      "notes": "11% 与确定性预执行的设计因果是面试好素材。"
+    },
+    {
+      "claim_id": "C003",
+      "signal_id": "S02",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现三级修复升级阶梯：封闭规则集内的确定性代码修复（深拷贝修补违规字段）→ 预算门控的单次 LLM 修复（带 kill-switch）→ 确定性模板降级候选；修复路径以五级 provenance 标签（model_pass/deterministic_repair/llm_repair/format_repair/fallback）随运行事件发出，用于评测中拆分模型贡献与工程贡献；未知规则码计入 Prometheus 指标作为规则沉淀的待办信号。",
+      "mandatory_scope": ["backend/app/agent/deterministic_repair.py + graph.py 修复路径"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/agent/deterministic_repair.py",
+        "backend/tests/test_unknown_rule_fault_injection.py"
+      ],
+      "prohibited_escalations": ["LLM 无法自我修复（0/6 为注释记载的实测，属 COMMENT_ONLY，不写入 bullet）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+故障注入测试确认；设计依据（live eval 0/6 自修复失败、v6/v7/v8 prompt 消融）记录于 docstring，为 COMMENT_ONLY 语境。",
+      "notes": "deterministic_repair.py 文件引入作者为 HHHAnQi。"
+    },
+    {
+      "claim_id": "C004",
+      "signal_id": "S03",
+      "claim_type": "mechanism",
+      "canonical_claim": "在纯 Postgres 上实现持久任务执行器：以 SELECT ... FOR UPDATE SKIP LOCKED 认领待运行任务，worker 持租约并周期心跳续期；每次事务写入前校验 worker_id+attempt_count+租约有效期做栅栏；崩溃恢复将过期租约任务重新入队、标记中断步骤，且在终态化前先抢回租约以栅栏旧 owner；优雅停机的任务释放重试而非判失败；执行路径返回后兜底确保任何运行必达终态。",
+      "mandatory_scope": ["backend/app/agent/executor.py（AgentRunExecutor，无外部消息队列）"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/agent/executor.py",
+        "backend/tests/test_multi_worker_concurrency.py",
+        "backend/alembic/versions/20260820_0023_agent_run_lease_memory_idempotency.py"
+      ],
+      "prohibited_escalations": ["生产级多 worker 高可用（自审计文档明确未声称）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+多 worker 并发测试确认。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C005",
+      "signal_id": "S03",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现恰好一次终态契约：agent_events 表对终态事件建唯一索引，事件记录器拒绝终态后写入，终结器以单次行锁事务原子完成领域结果持久化、步骤完成、终态列（token/成本/延迟汇总）写入与租约清理；持久化失败自转换为 finalize_failed 而不破坏终态契约；候选计划引用的证据必须对最终一次 provider 调用可见方可持久化（防幻觉持久化门）。",
+      "mandatory_scope": ["backend/app/agent/finalizer.py + app/models/agent_run.py 唯一索引"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/agent/finalizer.py",
+        "backend/app/models/agent_run.py",
+        "backend/tests/test_evidence_integrity.py"
+      ],
+      "prohibited_escalations": ["exactly-once 投递语义（契约限定于终态事件与持久化事务）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+DB 唯一索引+测试确认。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C006",
+      "signal_id": "S03",
+      "claim_type": "mechanism",
+      "canonical_claim": "事件流以 Postgres 为权威存储：SSE 端点轮询数据库事件表（带序号 id 与心跳），支持 Last-Event-ID 断线续传（非法值 422）；取消为协作式幂等设计——SELECT FOR UPDATE 下写入 cancel_requested_at 与取消幂等键（payload 哈希），同键不同 payload 返回 409，执行器经数据库轮询感知取消并向 owner 任务传播 cancel()。",
+      "mandatory_scope": ["backend/app/services/agent_runs.py + api/agent_runs.py"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/services/agent_runs.py",
+        "frontend/src/api/sse.ts"
+      ],
+      "prohibited_escalations": [],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+前端断线重连客户端（指数退避+jitter）确认端到端。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C007",
+      "signal_id": "S04",
+      "claim_type": "object",
+      "canonical_claim": "存在数据库承载的评测控制平面（eval_experiments/eval_trials/eval_scores）：数据集清单冻结源文件 sha256 与用例数、篡改即拒；实验冻结 git/graph/prompt/model/tool/context/memory 全版本身份；trial 跑真实运行时（mock/fixture/live 三种 provider 模式）；统计层输出 Wilson 95% CI 与硬门禁通过率；提供创建/进度/取消/报告再生的 HTTP 生命周期 API。",
+      "mandatory_scope": ["backend/evals/v2/ + backend/app/api/evals.py"],
+      "evidence_context": null,
+      "support_level": "VERIFIED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/evals/v2/contracts.py",
+        "backend/evals/v2/experiment_runner.py",
+        "backend/evals/v2/stats.py",
+        "backend/tests/evals_v2/test_eval_lifecycle_api.py"
+      ],
+      "prohibited_escalations": ["工业级评测平台"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "代码+46 个测试文件+alembic 迁移确认存在且可执行。evals/v2 文件引入作者为 HHHAnQi。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C008",
+      "signal_id": "S04",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现实验臂不变量校验（arm invariants）：试验前校验冻结配置与声明臂一致（如 direct_llm 臂必须零工具暴露），试验后校验真实轨迹（真裸臂必须零工具调用）；违例将 trial 标记 invalid_arm_configuration 而非静默产出错误结论。",
+      "mandatory_scope": ["backend/evals/v2/arm_invariants.py"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/evals/v2/arm_invariants.py",
+        "backend/tests/evals_v2/test_arm_invariants.py",
+        "backend/tests/evals_v2/test_stage_b1_agent_variant.py"
+      ],
+      "prohibited_escalations": [],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+测试确认。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C009",
+      "signal_id": "S04",
+      "claim_type": "metric",
+      "canonical_claim": "实验臂不变量校验发现首轮'裸模型'基线实际仍接受确定性记忆预执行与上下文注入（伪裸基线），修正为真裸配置重跑后通过率为 72.4%（21/29，29 例中 8 例硬门禁失败 + 1 例运行时失败），该失败明细由仓库内原始 bad-case 导出文件核验；此前 93.3% 的'裸基线'数字被项目自身推翻。",
+      "mandatory_scope": [
+        "实验 6b03e9af（MEMORY_DISABLED + direct），29 例 live 运行",
+        "失败明细 = backend/evals/bad_cases/6b03e9af-*.jsonl（8 hard_gate_failure + 1 runtime_failure）",
+        "分母 29 与对照 93.3% 出自 docs/standards/slo.md 权威口径（DB 承载，逐 trial 数据未随仓库归档）",
+        "此为修正性测量，非受控 A/B 的最终结论"
+      ],
+      "evidence_context": "OBSERVED_RUN",
+      "support_level": "PARTIAL",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/evals/bad_cases/6b03e9af-cecb-4cce-9ff6-5c81dfd63dc5.jsonl",
+        "docs/standards/slo.md"
+      ],
+      "allowed_metrics": [
+        {"name": "true_bare_baseline_pass_rate", "result": 0.724, "unit": "ratio", "sample_size": 29}
+      ],
+      "prohibited_escalations": ["+20.9pp Agent 骨架贡献（p=0.032 为 slo.md 口径，未见逐 trial 原始数据归档，不写入 bullet）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "bad-case 原始文件核验失败计数；分母与对照数字为文档口径。作为'修正性发现'陈述（而非效果宣称）使用。",
+      "notes": "+20.9pp/p=0.032 与 88.9% 权威口径为面试材料。"
+    },
+    {
+      "claim_id": "C010",
+      "signal_id": "S04",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现成对比较判官的位置偏差校准体系：每个样本对以两个槽位顺序各判一次，裁决经反换位归一化为基线相对胜者；度量位置一致率与位置偏差率；判官-人工一致性以 4 标签词汇表计算 Cohen's κ（对照双人标注金集）；校准状态为三态门（一致率≥0.70、位置偏差≤0.15、有效对数≥100，阈值随 policy version 冻结），未达门槛的判官只能诊断使用、不得作为门禁。",
+      "mandatory_scope": ["backend/evals/v2/ pairwise 校准栈 + annotations/ 双人金集"],
+      "evidence_context": null,
+      "support_level": "VERIFIED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/evals/v2/calibration.py",
+        "backend/evals/v2/calibration_metrics.py",
+        "backend/tests/evals_v2/test_calibration_metrics.py",
+        "backend/evals/annotations/rubric-v1-worksheet.jsonl"
+      ],
+      "prohibited_escalations": ["判官已通过校准（现有 23 对远低于 100 对门槛，处于 diagnostic_only）", "κ=0.68 达标（人工标注者间 κ 仅 0.03–0.12，单独引用判官 κ 误导）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "机制+测试+原始标注文件确认；具体 κ 数值因人工基线一致性过低，按机制而非数字表述。",
+      "notes": "INTER_ANNOTATOR_REPORT 的诚实结论：先让人与人一致（κ≥0.7）再谈判官校准。"
+    },
+    {
+      "claim_id": "C011",
+      "signal_id": "S04",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现反事实配对消融评测：记忆/上下文规模/工具可用性/证据四个轴的消融组共享同一基础 fixture（相同请求/画像/窗口），差异仅归因于被消融轴；不显著的结果被显式降级不予主张（如记忆消融 +13.3pp 因 p=0.129 被项目自身降级）。",
+      "mandatory_scope": ["backend/evals/v2/counterfactual_loader.py + graders"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/evals/v2/counterfactual_loader.py",
+        "backend/tests/evals_v2/test_counterfactual.py",
+        "backend/tests/evals_v2/test_counterfactual_graders.py"
+      ],
+      "prohibited_escalations": ["记忆层带来 +13.3pp 提升（已被项目降级为不显著）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "机制+测试确认；canonical 中包含'显式降级不主张'的治理事实。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C012",
+      "signal_id": "S04",
+      "claim_type": "mechanism",
+      "canonical_claim": "评测作为 CI 门禁：每次 push/PR 在 pgvector 服务容器上执行 ruff+mypy、意图路由契约评测（≥20 用例）、alembic 升级/回退/校验、全量 pytest、离线 Stage-5 评测与 Eval V2 确定性冒烟（mock provider、要求全部硬门禁通过），任一失败即阻断。",
+      "mandatory_scope": [".github/workflows/ci.yml"],
+      "evidence_context": null,
+      "support_level": "VERIFIED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [".github/workflows/ci.yml"],
+      "prohibited_escalations": ["把 mock 门禁通过表述为模型质量"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "workflow 文件确认；mock 门禁的语义边界由项目文档自我约束。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C013",
+      "signal_id": "S05",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现零 LLM 调用的三级确定性上下文压缩：旧任务按字符 bigram 重叠+嵌入余弦的混合相关性打分做'相关性救援'（阈值以上按时间序提升进保留窗口）、动态 token 预算下逐步收缩近因窗口但不低于下限（2 任务/1 复盘）、被裁剪内容折叠进结构化摘要（已完成交付物/重复阻塞/调整模式）而非静默丢弃；token 估算为手写的中英混合保守估计器，不依赖 provider 分词器。",
+      "mandatory_scope": ["backend/app/agent/context_compression.py"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/agent/context_compression.py",
+        "backend/tests/test_stage6_context_rendering.py"
+      ],
+      "prohibited_escalations": [],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+测试确认。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C014",
+      "signal_id": "S05",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现可审计的上下文构建清单：候选按词法+嵌入双路 RRF(k=60) 融合排序，贪心 MMR 选择（相关性与冗余惩罚加权、未见来源类型加多样性分），逐项最低分地板，token 截断用二分搜索；提示注入模式（正则族）命中项分数清零并记录 exclusion_reason；完整清单（候选、入选引用、逐项排除原因、渲染上下文哈希、算法版本号）随运行持久化，可复算审计。",
+      "mandatory_scope": ["backend/app/agent/resume_context_selection.py"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/agent/resume_context_selection.py",
+        "backend/app/tools/sanitization.py",
+        "backend/app/prompts/context_renderer.py"
+      ],
+      "prohibited_escalations": [],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+sanitize/renderer 纵深确认。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C015",
+      "signal_id": "S06",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现混合检索管线：结构感知分块（标题硬边界+段落打包）、pgvector 部分 HNSW 索引（cosine，ef_search=200）与 pg_trgm 词法通道 RRF(k=60) 融合、按用户与文档类型预过滤；'宽召回窄重排'——召回 50 仅取 top-20 进重排器，且重排器接收原始 query 而非同义扩展 query（两条决策均由注释中记录的实测回归驱动）；相对可回答性门（top 分数须≥中位数 5 倍且过绝对下限，否则返回零结果）作为防幻觉契约。",
+      "mandatory_scope": ["backend/app/rag/ + services/rag_documents.py，PostgreSQL-only"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/rag/chunking.py",
+        "backend/app/repositories/rag_documents.py",
+        "backend/app/providers/rerank.py",
+        "backend/tests/test_hybrid_relevance.py"
+      ],
+      "prohibited_escalations": ["大规模检索（规模矩阵结论已被项目自行撤回）"],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+测试确认；决策依据的回归数字（0.95→0.67 / MRR 1.0→0.63）为代码注释记载（COMMENT_ONLY），不入 canonical 数字。",
+      "notes": "rag/ 栈文件引入作者为 HHHAnQi。"
+    },
+    {
+      "claim_id": "C016",
+      "signal_id": "S07",
+      "claim_type": "mechanism",
+      "canonical_claim": "实现记录/重放执行 harness：审计包装器将每次物理 provider 调用的脱敏请求/响应投影持久化为独立会话的 ProviderCall 行（不干扰业务事务）；FixtureStore 按调用序号+请求投影哈希做惰性录制/重放，漂移即抛 desync 错误；节点级 checkpoint 校验同 attempt 内输出哈希稳定；运行时版本身份聚合 git sha 与 graph/prompt/tool/context/memory 版本；exact_fixture_replay 模式下 fixture 缺失即失败，不静默回落 live。",
+      "mandatory_scope": ["backend/app/harness/ + app/runtime/versioning.py"],
+      "evidence_context": null,
+      "support_level": "STRONG",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        "backend/app/harness/provider_calls/audit.py",
+        "backend/app/harness/provider_calls/fixture_store.py",
+        "backend/tests/evals_v2/test_fixture_replay_determinism.py",
+        "backend/tests/test_planning_checkpoint.py"
+      ],
+      "prohibited_escalations": [],
+      "claim_status": "APPROVED",
+      "resume_eligibility": "ALLOWED",
+      "eligibility_rationale": "实现+确定性测试确认；未入 bullets（预算），面试核心材料。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C101",
+      "signal_id": "S04",
+      "claim_type": "metric",
+      "canonical_claim": "硬门禁通过率 72.2%→92.2%（k=3）。",
+      "evidence_context": "COMMENT_ONLY",
+      "support_level": "SELF_CLAIMED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["docs/standards/slo.md（历史口径段，被同文档标注'仅作过程记录'并由 cd3eb74e 权威口径取代）"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "项目自身已将 92.2% 标注为被取代的历史数字；权威口径 88.9% 的逐 trial 数据在 DB 中未随仓库归档。",
+      "notes": "面试可用措辞：'三波修复后 trial 级硬门禁 88.9%（Wilson CI [80.7,93.9]），过程峰值 92.2%'。"
+    },
+    {
+      "claim_id": "C102",
+      "signal_id": "S04",
+      "claim_type": "metric",
+      "canonical_claim": "记忆层带来 +13.3pp 提升。",
+      "support_level": "SELF_CLAIMED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["docs/architecture/architecture-v2.md（k=1，p=0.129）"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "p=0.129 不显著，项目自身已降级主张；引用即与仓库治理规则冲突。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C103",
+      "signal_id": "S04",
+      "claim_type": "metric",
+      "canonical_claim": "裸模型基线 93.3%。",
+      "support_level": "SELF_CLAIMED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["docs/standards/slo.md v1.1 段（后被 arm invariants 推翻）"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "已被项目自身的真裸重跑（72.4%）推翻，只能作为纠错叙事引用（见 C009）。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C104",
+      "signal_id": "S06",
+      "claim_type": "metric",
+      "canonical_claim": "向量检索在 504 chunks 时 Recall 崩塌至 0.054、重排带来 3.6× 提升。",
+      "support_level": "SELF_CLAIMED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["docs/review/retrieval-scale-matrix-2026-08-26.md（同文件方法论更正段自行撤回）"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "合成语料近克隆导致评测设计缺陷，结论被作者自行撤回。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C105",
+      "signal_id": "S04",
+      "claim_type": "metric",
+      "canonical_claim": "Agent 骨架贡献 +20.9pp（p=0.032 显著）。",
+      "support_level": "SELF_CLAIMED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["docs/standards/slo.md（DB 承载实验，逐 trial 数据未归档；bad-case 文件仅旁证 72.4% 端点）"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "差值的 93.3% 端无仓库内原始产物；作为 bullet 数字证据链不完整。",
+      "notes": "面试可讲（口径、显著性、k=1 限定都要带）。"
+    },
+    {
+      "claim_id": "C106",
+      "signal_id": "S04",
+      "claim_type": "metric",
+      "canonical_claim": "30/30 全过、11 个确定性 grader 全 1.0（作为模型质量证明）。",
+      "evidence_context": "OBSERVED_RUN",
+      "support_level": "VERIFIED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["backend/evals/artifacts/20260823T063621Z-dbbd4f82.json"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "mock provider 的确定性回归产物，项目文档明文规定'不能外推真实模型质量'；只能作为回归门禁机制（C012）的证据。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C107",
+      "signal_id": "S08",
+      "claim_type": "ownership",
+      "canonical_claim": "候选人独立设计并实现本项目的 Agent 运行时/评测体系。",
+      "support_level": "PARTIAL",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": [
+        ".evidence/git_ownership.json（HHHAnQi 157 commits / lyyjsr+Li Ye 约 19 commits，双人仓库）"
+      ],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "双人仓库且候选身份未解析：文件引入分析显示 agent 运行时核心（graph/executor/node_runner/finalizer）由 lyyjsr 引入，evals v2/RAG 栈/确定性修复由 HHHAnQi 引入。身份确认前一切归属声明拒绝；bullets 不使用领导性或独占性措辞。",
+      "notes": "身份确认后需按子系统归属表过滤 bullets（见报告 OWNERSHIP ANALYSIS）。"
+    },
+    {
+      "claim_id": "C108",
+      "signal_id": "S08",
+      "claim_type": "maturity",
+      "canonical_claim": "系统为生产级。",
+      "support_level": "UNVERIFIED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["docs/review/production-readiness-audit-2026-08-10.md（自审计承认无节点级持久检查点恢复/无多 worker 评测执行器/无 OTel/无备份）"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "项目自审计明确否认生产就绪；硬性禁词。",
+      "notes": ""
+    },
+    {
+      "claim_id": "C109",
+      "signal_id": "S03",
+      "claim_type": "metric",
+      "canonical_claim": "P95 28.6s / 单次运行成本 ¥0.0037。",
+      "support_level": "SELF_CLAIMED",
+      "ownership_status": "OWNERSHIP_UNRESOLVED",
+      "evidence_refs": ["docs/standards/slo.md（DB 承载，无原始产物）"],
+      "claim_status": "REJECTED",
+      "resume_eligibility": "NOT_ALLOWED",
+      "eligibility_rationale": "无仓库内原始产物；延迟数字本身也不利于简历展示。",
+      "notes": ""
+    }
+  ]
+}
