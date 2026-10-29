@@ -782,7 +782,7 @@ class PairwiseCalibrationService:
             [sweep.comparison_group_id for sweep in sweeps]
         )
         annotations = await self._repo.list_annotations_by_sweeps(sweep_ids)
-        judge_result_snapshot = [
+        judge_result_snapshot: list[dict[str, object]] = [
             {
                 "pair_id": str(result.pair_id),
                 "judge_run_id": str(result.judge_run_id),
@@ -794,7 +794,7 @@ class PairwiseCalibrationService:
             }
             for result in judge_results
         ]
-        annotation_snapshot = [
+        annotation_snapshot: list[dict[str, object]] = [
             {
                 "annotation_id": str(annotation.id),
                 "pair_id": str(annotation.pair_id),
