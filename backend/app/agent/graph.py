@@ -26,12 +26,12 @@ from app.agent.nodes import (
     route_intent,
     validate_candidate,
 )
+from app.agent.planning_runner import CareerPlanningAgentRunner
 from app.agent.ports import PlanningContextPort, PlanningResultPort
 from app.agent.runtime_support import (
     as_int,
     build_provider_telemetry,
     candidate_checkpoint_payload,
-    combine_provider_usage,
     extract_provider_usage,
     planning_input_fingerprint,
     restore_candidate_checkpoint,
@@ -43,14 +43,11 @@ from app.harness.checkpoints import CheckpointStore
 from app.harness.events import EventRecorder
 from app.harness.evidence import build_evidence_visibility
 from app.harness.snapshots import SnapshotService
-from app.harness.stream_progress import StreamProgressPublisher
 from app.models.agent_run import AgentRun
 from app.models.user_profile import UserProfile
 from app.providers.embedding import EmbeddingProvider, MockEmbeddingProvider
 from app.providers.llm import PlanningProvider
-from app.providers.streaming import bind_stream_delta_sink
 from app.schemas.agent_runs import (
-    AgentTurnResponse,
     ClarificationRequest,
     EvidenceCatalogItem,
     EvidenceVisibility,
@@ -64,12 +61,10 @@ from app.schemas.agent_runs import (
     PlanningState,
     ProfileContext,
     ProviderPlanResponse,
-    ProviderUsage,
     RunInputSnapshot,
     ValidationReport,
 )
 from app.schemas.enums import GoalType, ReplanMode, RunIntent
-from app.tools.contracts import ToolContext
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -134,6 +129,12 @@ class FixedPlanningGraph:
         self._tool_registry = tool_registry
         self._embedding_provider = embedding_provider
         self._context_reader = context_reader
+        self._candidate_runner = CareerPlanningAgentRunner(
+            session_factory=session_factory,
+            provider=provider,
+            budget=budget,
+            tool_registry=tool_registry,
+        )
         self._graph = self._build_graph()
 
     async def execute(self, state: PlanningState) -> None:
@@ -821,7 +822,7 @@ class FixedPlanningGraph:
                 state["run_id"],
             )
 
-        output = await self._generate_candidate_uncached(state, step_id)
+        output = await self._candidate_runner.generate(state, step_id)
         try:
             payload = {
                 **candidate_checkpoint_payload(output, state),
@@ -840,269 +841,6 @@ class FixedPlanningGraph:
                 exc_info=True,
             )
         return output
-
-    async def _generate_candidate_uncached(
-        self,
-        state: PlanningState,
-        step_id: UUID,
-    ) -> NodeOutput[
-        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
-    ]:
-        context = state["planning_context"]
-        mode = state["intent"].replan_mode
-        evidence_catalog = list(state.get("evidence_catalog", []))
-        tool_round = state.get("tool_round", 0)
-        tool_call_count = state.get("tool_call_count", 0)
-        total_usage: ProviderUsage | None = None
-        stream_summaries: list[dict[str, object]] = []
-        prompt_version = state["runtime_config"].prompt_versions["career_planning"]
-
-        def _step_telemetry(visibility: EvidenceVisibility) -> NodeTelemetry:
-            # Every return path below follows at least one provider call,
-            # so total_usage is always bound by the time this runs.
-            assert total_usage is not None
-            telemetry = build_provider_telemetry(total_usage, prompt_version, visibility)
-            if stream_summaries:
-                telemetry.trace_data["llm_stream"] = stream_summaries
-            return telemetry
-
-        for turn_index in range(3):
-            force_final = (
-                tool_round >= state["runtime_config"].max_tool_rounds
-                or tool_call_count >= state["runtime_config"].max_tool_calls
-            )
-            available_tools = self._tool_registry.available_specs(
-                intent=state["intent"].intent,
-                requires_fresh_information=state["intent"].requires_fresh_information,
-            )
-            # Deterministic memory pre-execution: when the router detects
-            # past-context references, EXECUTE memory_lookup directly (not
-            # just make it available — the model won't call it voluntarily,
-            # measured ~11% on GLM-4.7). Results go into the evidence
-            # catalog before the LLM call, so the tool_calls table records
-            # the execution and the grader sees it.
-            if (
-                turn_index == 0
-                and not force_final
-                and not state["runtime_config"].memory_disabled
-                and state["intent"].references_past_context
-                and state["intent"].intent in {RunIntent.CREATE_PLAN, RunIntent.REPLAN}
-                and not any(
-                    item.kind == "memory"
-                    for item in evidence_catalog
-                )
-            ):
-                pre_execution = await self._tool_registry.execute(
-                    tool_name="memory_lookup",
-                    arguments={"query": state["request"].message[:200], "limit": 5},
-                    context=ToolContext(
-                        run_id=state["run_id"],
-                        user_id=state["user_id"],
-                        goal_type=context.profile.goal_type,
-                        intent=state["intent"].intent,
-                        requires_fresh_information=(
-                            state["intent"].requires_fresh_information
-                        ),
-                        remaining_deadline_ms=int(self._budget.remaining_seconds() * 1000),
-                    ),
-                    step_id=step_id,
-                    round_number=1,
-                )
-                tool_call_count += 1
-                if pre_execution.success:
-                    for item in pre_execution.result.evidence:
-                        catalog_item = EvidenceCatalogItem.model_validate(
-                            item.model_dump(mode="json")
-                        )
-                        if all(
-                            existing.kind != catalog_item.kind
-                            or existing.id != catalog_item.id
-                            for existing in evidence_catalog
-                        ):
-                            evidence_catalog.append(catalog_item)
-            if force_final:
-                available_tools = []
-            visible_catalog, visibility = build_evidence_visibility(
-                call_id=f"{state['run_id']}:career_planning:{turn_index + 1}",
-                evidence_catalog=evidence_catalog,
-            )
-            # 当本轮没有任何 Tool 时，走更轻量的 generate_plan prompt 路径
-            # （ProviderPlanResponse schema）。带 Tool 时才使用完整的 agent-turn prompt。
-            using_plan_path = not available_tools
-            # Wire-level streaming: bind one throttled progress publisher per
-            # LLM call. Mock/deterministic providers never call the sink, so
-            # evaluation determinism is unchanged.
-            publisher = StreamProgressPublisher(
-                session_factory=self._session_factory,
-                run_id=state["run_id"],
-                node_name="career_planning_agent",
-                turn=turn_index + 1,
-            )
-            with bind_stream_delta_sink(publisher.on_delta):
-                if available_tools:
-                    raw = await self._provider.generate_agent_turn(
-                        message=state["request"].message,
-                        context=context,
-                        replan_mode=mode,
-                        available_tools=available_tools,
-                        evidence_catalog=visible_catalog,
-                        force_final=force_final,
-                    )
-                else:
-                    raw = await self._provider.generate_plan(
-                        message=state["request"].message,
-                        context=context,
-                        replan_mode=mode,
-                        evidence_catalog=visible_catalog,
-                    )
-            stream_summaries.append(publisher.summary())
-            usage = extract_provider_usage(raw)
-            self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
-            total_usage = (
-                usage if total_usage is None else combine_provider_usage(total_usage, usage)
-            )
-            try:
-                if using_plan_path:
-                    response = ProviderPlanResponse.model_validate(raw)
-                    candidate = response.candidate
-                    return NodeOutput(
-                        (
-                            candidate,
-                            evidence_catalog,
-                            visibility,
-                            tool_round,
-                            tool_call_count,
-                        ),
-                        _step_telemetry(visibility),
-                    )
-                turn = AgentTurnResponse.model_validate(raw)
-            except ValidationError:
-                self._budget.claim_format_repair()
-                repair_catalog, repair_visibility = build_evidence_visibility(
-                    call_id=f"{state['run_id']}:format_repair",
-                    evidence_catalog=evidence_catalog,
-                )
-                repaired = await self._provider.repair_format(
-                    raw_output=raw,
-                    context=context,
-                    replan_mode=mode,
-                    evidence_catalog=repair_catalog,
-                )
-                repair_usage = extract_provider_usage(repaired)
-                self._budget.record_llm_call(
-                    repair_usage.tokens_in,
-                    repair_usage.tokens_out,
-                )
-                total_usage = combine_provider_usage(total_usage, repair_usage)
-                prompt_version = state["runtime_config"].prompt_versions["format_repair"]
-                try:
-                    response = ProviderPlanResponse.model_validate(repaired)
-                except ValidationError:
-                    state["fallback_reason"] = "format_repair_failed"
-                    fallback = fallback_candidate(context, mode)
-                    _, fallback_visibility = build_evidence_visibility(
-                        call_id=f"{state['run_id']}:format_fallback",
-                        evidence_catalog=[],
-                    )
-                    return NodeOutput(
-                        (
-                            fallback,
-                            evidence_catalog,
-                            fallback_visibility,
-                            tool_round,
-                            tool_call_count,
-                        ),
-                        _step_telemetry(repair_visibility),
-                    )
-                # Format repair succeeded: the finalized candidate came from
-                # the provider repair call, not the model's first-shot output.
-                state["plan_provenance"] = "format_repair"
-                return NodeOutput(
-                    (
-                        response.candidate,
-                        evidence_catalog,
-                        repair_visibility,
-                        tool_round,
-                        tool_call_count,
-                    ),
-                    _step_telemetry(repair_visibility),
-                )
-            if turn.final is not None:
-                return NodeOutput(
-                    (
-                        turn.final,
-                        evidence_catalog,
-                        visibility,
-                        tool_round,
-                        tool_call_count,
-                    ),
-                    _step_telemetry(visibility),
-                )
-            if force_final:
-                raise StructuredOutputError("Tool requested after Tool budget was exhausted")
-            tool_round += 1
-            # Parallel tool calls: every accepted call in one round runs
-            # concurrently (the registry opens its own session per call).
-            # gather preserves submission order, so evidence collection and
-            # mock determinism are unchanged; a tool failure arrives as a
-            # non-successful ToolExecutionResult, never as an exception.
-            remaining_calls = (
-                state["runtime_config"].max_tool_calls - tool_call_count
-            )
-            accepted = [call for call in turn.tool_calls[:remaining_calls]]
-            tool_call_count += len(accepted)
-            if accepted:
-                deadline_ms = int(self._budget.remaining_seconds() * 1000)
-                tool_context = ToolContext(
-                    run_id=state["run_id"],
-                    user_id=state["user_id"],
-                    goal_type=context.profile.goal_type,
-                    intent=state["intent"].intent,
-                    requires_fresh_information=(state["intent"].requires_fresh_information),
-                    remaining_deadline_ms=deadline_ms,
-                )
-                executions = await asyncio.gather(
-                    *(
-                        self._tool_registry.execute(
-                            tool_name=call.name,
-                            arguments=call.arguments,
-                            context=tool_context,
-                            step_id=step_id,
-                            round_number=tool_round,
-                        )
-                        for call in accepted
-                    )
-                )
-                for execution in executions:
-                    if execution.success:
-                        for item in execution.result.evidence:
-                            catalog_item = EvidenceCatalogItem.model_validate(
-                                item.model_dump(mode="json")
-                            )
-                            if all(
-                                existing.kind != catalog_item.kind
-                                or existing.id != catalog_item.id
-                                for existing in evidence_catalog
-                            ):
-                                evidence_catalog.append(catalog_item)
-        if total_usage is None:
-            raise StructuredOutputError("Agent produced no turn")
-        state["fallback_reason"] = "tool_round_exhausted"
-        fallback = fallback_candidate(context, mode)
-        _, fallback_visibility = build_evidence_visibility(
-            call_id=f"{state['run_id']}:tool_fallback",
-            evidence_catalog=[],
-        )
-        return NodeOutput(
-            (
-                fallback,
-                evidence_catalog,
-                fallback_visibility,
-                tool_round,
-                tool_call_count,
-            ),
-            _step_telemetry(fallback_visibility),
-        )
 
     async def _revise_or_fallback(
         self, state: PlanningState

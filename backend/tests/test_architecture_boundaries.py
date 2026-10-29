@@ -74,3 +74,29 @@ def test_planning_graph_does_not_query_context_repositories() -> None:
     ]
 
     assert violations == []
+
+
+def test_planning_graph_delegates_provider_and_tool_loop() -> None:
+    """Provider turns and Tool execution belong to CareerPlanningAgentRunner."""
+
+    path = BACKEND_ROOT / "app/agent/graph.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    forbidden_calls = {
+        "generate_agent_turn",
+        "generate_plan",
+        "repair_format",
+        "execute",
+    }
+    violations = [
+        f"{node.func.attr}:{node.lineno}"
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in forbidden_calls
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr in {"_provider", "_tool_registry"}
+        )
+    ]
+
+    assert violations == []
