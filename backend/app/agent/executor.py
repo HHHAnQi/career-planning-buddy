@@ -46,6 +46,7 @@ from app.schemas.agent_runs import (
 )
 from app.schemas.enums import GoalType, ReplanMode
 from app.services.experience_atoms import ExperienceAtomService
+from app.services.planning_context import PlanningContextService
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -290,6 +291,10 @@ class AgentRunExecutor:
                 self._provider,
                 self._tool_registry,
                 self._embedding_provider,
+                PlanningContextService(
+                    self._session_factory,
+                    self._embedding_provider,
+                ),
             ).build(
                 node_runner=runner,
                 finalizer=finalizer,

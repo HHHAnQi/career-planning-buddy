@@ -52,3 +52,25 @@ def test_planning_runtime_support_remains_pure() -> None:
                     violations.append(f"{alias.name}:{node.lineno}")
 
     assert violations == []
+
+
+def test_planning_graph_does_not_query_context_repositories() -> None:
+    """Context persistence belongs behind PlanningContextPort."""
+
+    path = BACKEND_ROOT / "app/agent/graph.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    forbidden_modules = {
+        "app.repositories.evidence",
+        "app.repositories.interviews",
+        "app.repositories.plans",
+        "app.repositories.reviews",
+        "app.models.plan",
+        "app.models.review",
+    }
+    violations = [
+        f"{node.module}:{node.lineno}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module in forbidden_modules
+    ]
+
+    assert violations == []

@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from datetime import timedelta
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
@@ -13,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.context_compression import compress_context_history
-from app.agent.context_selection import MemorySelectionResult, select_memories
+from app.agent.context_selection import MemorySelectionResult
 from app.agent.errors import StructuredOutputError
 from app.agent.node_runner import NodeOutput, NodeRunner, NodeTelemetry
 from app.agent.nodes import (
@@ -27,7 +26,7 @@ from app.agent.nodes import (
     route_intent,
     validate_candidate,
 )
-from app.agent.ports import PlanningResultPort
+from app.agent.ports import PlanningContextPort, PlanningResultPort
 from app.agent.runtime_support import (
     as_int,
     build_provider_telemetry,
@@ -39,7 +38,6 @@ from app.agent.runtime_support import (
 )
 from app.core.database import session_transaction
 from app.core.metrics import AGENT_REPAIR_PATH, AGENT_UNKNOWN_RULE, make_labels
-from app.core.time import product_today
 from app.harness.budget import BudgetGuard
 from app.harness.checkpoints import CheckpointStore
 from app.harness.events import EventRecorder
@@ -47,16 +45,10 @@ from app.harness.evidence import build_evidence_visibility
 from app.harness.snapshots import SnapshotService
 from app.harness.stream_progress import StreamProgressPublisher
 from app.models.agent_run import AgentRun
-from app.models.plan import Plan
-from app.models.review import Review
 from app.models.user_profile import UserProfile
 from app.providers.embedding import EmbeddingProvider, MockEmbeddingProvider
 from app.providers.llm import PlanningProvider
 from app.providers.streaming import bind_stream_delta_sink
-from app.repositories.evidence import EvidenceRepository
-from app.repositories.interviews import InterviewRepository
-from app.repositories.plans import PlanRepository
-from app.repositories.reviews import ReviewRepository
 from app.schemas.agent_runs import (
     AgentTurnResponse,
     ClarificationRequest,
@@ -68,19 +60,15 @@ from app.schemas.agent_runs import (
     MemoryParcel,
     NavigationResult,
     PlanCandidate,
-    PlanContext,
-    PlanFocusContext,
     PlanningContext,
     PlanningState,
     ProfileContext,
     ProviderPlanResponse,
     ProviderUsage,
-    ReviewContext,
     RunInputSnapshot,
-    TaskContext,
     ValidationReport,
 )
-from app.schemas.enums import GoalType, PlanStatus, ReplanMode, RunIntent, TaskStatus
+from app.schemas.enums import GoalType, ReplanMode, RunIntent
 from app.tools.contracts import ToolContext
 from app.tools.registry import ToolRegistry
 
@@ -126,6 +114,7 @@ class FixedPlanningGraph:
         budget: BudgetGuard,
         tool_registry: ToolRegistry,
         embedding_provider: EmbeddingProvider,
+        context_reader: PlanningContextPort,
     ) -> None:
         self._session_factory = session_factory
         self._checkpoints = CheckpointStore(session_factory)
@@ -144,6 +133,7 @@ class FixedPlanningGraph:
         self._budget = budget
         self._tool_registry = tool_registry
         self._embedding_provider = embedding_provider
+        self._context_reader = context_reader
         self._graph = self._build_graph()
 
     async def execute(self, state: PlanningState) -> None:
@@ -650,36 +640,16 @@ class FixedPlanningGraph:
             return {"memory_parcel": MemoryParcel()}
         goal_type = intent.effective_goal_type
 
-        blockers: list[str] = []
-        adjustment_request: str | None = None
         async with self._context_db_lock:
-            async with self._session_factory() as session:
-                async with session_transaction(session):
-                    plans = PlanRepository(session)
-                    reviews = ReviewRepository(session)
-                    source_review: Review | None = None
-                    if state["request"].source_review_id is not None:
-                        source_review = await reviews.get_for_user(
-                            state["request"].source_review_id,
-                            state["user_id"],
-                        )
-                    task_rows = await plans.recent_tasks(state["user_id"], limit=30)
-                    blockers = [
-                        task.abandoned_reason_text or task.deliverable
-                        for task in task_rows
-                        if task.state == "abandoned"
-                    ][:10]
-                    if source_review is not None and source_review.blockers:
-                        blockers.insert(0, source_review.blockers)
-                        blockers = list(dict.fromkeys(blockers))[:10]
-                    adjustment_request = (
-                        source_review.adjustment_request if source_review else None
-                    )
+            query_facts = await self._context_reader.load_memory_query_facts(
+                user_id=state["user_id"],
+                source_review_id=state["request"].source_review_id,
+            )
         query = build_memory_query(
             user_message=state["request"].message,
             goal_type=intent.effective_goal_type.value,
-            blockers=blockers,
-            adjustment_request=adjustment_request,
+            blockers=query_facts.blockers,
+            adjustment_request=query_facts.adjustment_request,
         )
         vector: list[float] | None = None
         embed_latency_ms = 0
@@ -703,29 +673,25 @@ class FixedPlanningGraph:
                 retrieval_failed=False,
             )
             try:
-                async with self._session_factory() as session:
-                    async with session_transaction(session):
-                        memory_selection = await select_memories(
-                            repository=EvidenceRepository(session),
-                            embedding_provider=self._embedding_provider,
-                            user_id=state["user_id"],
-                            user_message=state["request"].message,
-                            goal_type=goal_type.value,
-                            blockers=blockers,
-                            adjustment_request=adjustment_request,
-                            semantic_enabled=config.memory_semantic_retrieval_enabled,
-                            retrieval_limit=config.memory_retrieval_limit,
-                            max_items=config.memory_context_max_items,
-                            max_chars=config.memory_context_max_chars,
-                            min_similarity=config.memory_min_similarity,
-                            half_life_days=config.memory_recency_half_life_days,
-                            exclude_categories=(
-                                set(config.exclude_memory_categories)
-                                if config.exclude_memory_categories
-                                else None
-                            ),
-                            precomputed_vector=vector,
-                        )
+                memory_selection = await self._context_reader.select_memories(
+                    user_id=state["user_id"],
+                    user_message=state["request"].message,
+                    goal_type=goal_type.value,
+                    blockers=query_facts.blockers,
+                    adjustment_request=query_facts.adjustment_request,
+                    semantic_enabled=config.memory_semantic_retrieval_enabled,
+                    retrieval_limit=config.memory_retrieval_limit,
+                    max_items=config.memory_context_max_items,
+                    max_chars=config.memory_context_max_chars,
+                    min_similarity=config.memory_min_similarity,
+                    half_life_days=config.memory_recency_half_life_days,
+                    exclude_categories=(
+                        set(config.exclude_memory_categories)
+                        if config.exclude_memory_categories
+                        else None
+                    ),
+                    precomputed_vector=vector,
+                )
             except Exception:
                 memory_selection = memory_selection.__class__(
                     selected=[],
@@ -780,119 +746,16 @@ class FixedPlanningGraph:
         Runs exclusively under the shared context lock so the two fan-out
         branches never interleave transactions on a single connection."""
 
-        async def load() -> HistoryParcel:
-            source_plan: Plan | None = None
-            source_review: Review | None = None
-            recent_tasks: list[TaskContext] = []
-            recent_reviews: list[ReviewContext] = []
-            completed_facts: list[str] = []
-            blockers: list[str] = []
-            interview_training_actions: list[str] = []
-            async with self._session_factory() as session:
-                async with session_transaction(session):
-                    plans = PlanRepository(session)
-                    if state["request"].source_plan_id is not None:
-                        source_plan = await plans.get_for_user(
-                            state["request"].source_plan_id,
-                            state["user_id"],
-                        )
-                    reviews = ReviewRepository(session)
-                    if state["request"].source_review_id is not None:
-                        source_review = await reviews.get_for_user(
-                            state["request"].source_review_id,
-                            state["user_id"],
-                        )
-                        if (
-                            source_review is None
-                            or source_plan is None
-                            or source_review.plan_id != source_plan.id
-                        ):
-                            raise StructuredOutputError(
-                                "source Review and source Plan must belong to the Run user"
-                            )
-                    task_rows = await plans.recent_tasks(state["user_id"], limit=30)
-                    recent_tasks = [
-                        TaskContext(
-                            task_id=task.id,
-                            state=TaskStatus(task.state),
-                            title=task.title,
-                            deliverable=task.deliverable,
-                            scheduled_date=task.scheduled_date,
-                            abandoned_reason=task.abandoned_reason,
-                            abandoned_reason_text=task.abandoned_reason_text,
-                        )
-                        for task in task_rows
-                    ]
-                    completed_facts = [
-                        task.deliverable
-                        for task in task_rows
-                        if task.state == "completed"
-                    ][:20]
-                    blockers = [
-                        task.abandoned_reason_text or task.deliverable
-                        for task in task_rows
-                        if task.state == "abandoned"
-                    ][:10]
-                    if source_plan is not None:
-                        review_rows = await reviews.recent_for_plan(
-                            state["user_id"],
-                            source_plan.id,
-                            limit=7,
-                        )
-                        recent_reviews = [
-                            self._review_context(item) for item in review_rows
-                        ]
-                    if source_review is not None and source_review.blockers:
-                        blockers.insert(0, source_review.blockers)
-                        blockers = list(dict.fromkeys(blockers))[:10]
-                    report_session_id = (
-                        state["request"].source_interview_report_session_id
-                    )
-                    if report_session_id is not None:
-                        report_session = await InterviewRepository(
-                            session
-                        ).get_session(report_session_id, state["user_id"])
-                        if report_session is None or report_session.report_json is None:
-                            raise StructuredOutputError(
-                                "source Interview Report must belong to the Run user"
-                            )
-                        raw_actions = report_session.report_json.get(
-                            "recommended_training_actions", []
-                        )
-                        actions = raw_actions if isinstance(raw_actions, list) else []
-                        interview_training_actions = [
-                            str(item.get("title")) + "：" + str(item.get("deliverable"))
-                            for item in actions
-                            if (
-                                isinstance(item, dict)
-                                and item.get("title")
-                                and item.get("deliverable")
-                                and str(item.get("title")) in state["request"].message
-                            )
-                        ][:3]
-            planning_date = None
-            if source_plan is not None:
-                planning_date = max(
-                    product_today(),
-                    source_plan.plan_date + timedelta(days=7),
-                )
-            return HistoryParcel(
-                source_plan=self._plan_context(source_plan) if source_plan else None,
-                source_review=(
-                    self._review_context(source_review) if source_review else None
-                ),
-                source_plan_id=source_plan.id if source_plan else None,
-                source_plan_version=source_plan.version if source_plan else None,
-                planning_date=planning_date,
-                recent_tasks=recent_tasks,
-                recent_reviews=recent_reviews,
-                completed_facts=completed_facts,
-                blockers=blockers,
-                interview_training_actions=interview_training_actions,
-            )
-
         async def work() -> NodeOutput[dict[str, object]]:
-            parcel = await load()
+            parcel = await self._context_reader.load_history(
+                user_id=state["user_id"],
+                source_plan_id=state["request"].source_plan_id,
+                source_review_id=state["request"].source_review_id,
+                source_interview_report_session_id=(
+                    state["request"].source_interview_report_session_id
+                ),
+                request_message=state["request"].message,
+            )
             if not state["runtime_config"].context_fanout_enabled:
                 # Serial A/B mode: this branch also produces the memory
                 # parcel so the merge node is unchanged.
@@ -919,30 +782,6 @@ class FixedPlanningGraph:
             "evidence_loader",
             work,
             lock=self._context_db_lock,
-        )
-
-    @staticmethod
-    def _plan_context(plan: Plan) -> PlanContext:
-        return PlanContext(
-            plan_id=plan.id,
-            version=plan.version,
-            status=PlanStatus(plan.status),
-            plan_date=plan.plan_date,
-            horizon_start=plan.horizon_start,
-            horizon_end=plan.horizon_end,
-            overall_direction=plan.overall_direction,
-            weekly_focus=[PlanFocusContext.model_validate(item) for item in plan.weekly_focus_json],
-        )
-
-    @staticmethod
-    def _review_context(review: Review) -> ReviewContext:
-        return ReviewContext(
-            review_id=review.id,
-            review_date=review.review_date,
-            blockers=review.blockers,
-            adjustment_request=review.adjustment_request,
-            free_text=review.free_text,
-            replan_reason=review.replan_reason,
         )
 
     async def _generate_candidate(
@@ -1442,11 +1281,15 @@ class GraphFactory:
         provider: PlanningProvider,
         tool_registry: ToolRegistry | None = None,
         embedding_provider: EmbeddingProvider | None = None,
+        context_reader: PlanningContextPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._provider = provider
         self._tool_registry = tool_registry or ToolRegistry()
         self._embedding_provider = embedding_provider or MockEmbeddingProvider()
+        if context_reader is None:
+            raise ValueError("context_reader is required")
+        self._context_reader = context_reader
 
     def build(
         self,
@@ -1463,6 +1306,7 @@ class GraphFactory:
             budget=budget,
             tool_registry=self._tool_registry,
             embedding_provider=self._embedding_provider,
+            context_reader=self._context_reader,
         )
 
 
