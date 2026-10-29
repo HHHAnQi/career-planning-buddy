@@ -12,6 +12,7 @@
 - [新增用例检查表](./use-case-development-checklist.md)
 - [验证与评审](./verification-and-review.md)
 - [门禁脚本规范](./check-scripts-spec.md)
+- [公开能力与指标声明规范](./public-claims-policy.md)
 
 ## 工作原则
 

@@ -56,6 +56,9 @@ jobs:
       - name: Audit deployable configuration
         run: python -m scripts.audit_config
 
+      - name: Audit public claims
+        run: python -m scripts.audit_public_claims
+
       - name: Evaluate intent routing contract
         run: python -m scripts.evaluate_intent_router
 

@@ -1,5 +1,11 @@
 # RELEASE_TRUTH_AUDIT.md（2026-08-29，基线 commit `85f83ce` + 本轮硬化提交）
 
+> Status: HISTORICAL
+>
+> Applies to: 2026-08-29 硬化基线，不代表当前默认分支的全部事实。
+>
+> 当前能力请以 [`docs/architecture/current-system-overview.md`](docs/architecture/current-system-overview.md)、代码、迁移和测试为准。
+
 > 方法：逐项以真实代码为准（非 README），STATUS 三档 + 证据定位 + 允许/禁止
 > 的对外表述。本轮硬化中修正的两处事实漂移已同步（overview 的 checkpoint
 > 与混合检索表述、README 的基线/当前结果拆分）。
