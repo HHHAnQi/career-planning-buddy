@@ -1,10 +1,7 @@
 """Fixed Stage 4 planning/replanning graph topology and node orchestration."""
 
 import asyncio
-import json
 import logging
-from datetime import timedelta
-from hashlib import sha256
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
@@ -15,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.context_compression import compress_context_history
-from app.agent.context_selection import MemorySelectionResult, select_memories
+from app.agent.context_selection import MemorySelectionResult
 from app.agent.errors import StructuredOutputError
 from app.agent.node_runner import NodeOutput, NodeRunner, NodeTelemetry
 from app.agent.nodes import (
@@ -29,29 +26,27 @@ from app.agent.nodes import (
     route_intent,
     validate_candidate,
 )
-from app.agent.ports import PlanningResultPort
+from app.agent.planning_runner import CareerPlanningAgentRunner
+from app.agent.ports import PlanningContextPort, PlanningResultPort
+from app.agent.runtime_support import (
+    as_int,
+    build_provider_telemetry,
+    candidate_checkpoint_payload,
+    extract_provider_usage,
+    planning_input_fingerprint,
+    restore_candidate_checkpoint,
+)
 from app.core.database import session_transaction
 from app.core.metrics import AGENT_REPAIR_PATH, AGENT_UNKNOWN_RULE, make_labels
-from app.core.time import product_today
 from app.harness.budget import BudgetGuard
 from app.harness.checkpoints import CheckpointStore
 from app.harness.events import EventRecorder
 from app.harness.evidence import build_evidence_visibility
 from app.harness.snapshots import SnapshotService
-from app.harness.stream_progress import StreamProgressPublisher
 from app.models.agent_run import AgentRun
-from app.models.plan import Plan
-from app.models.review import Review
-from app.models.user_profile import UserProfile
 from app.providers.embedding import EmbeddingProvider, MockEmbeddingProvider
 from app.providers.llm import PlanningProvider
-from app.providers.streaming import bind_stream_delta_sink
-from app.repositories.evidence import EvidenceRepository
-from app.repositories.interviews import InterviewRepository
-from app.repositories.plans import PlanRepository
-from app.repositories.reviews import ReviewRepository
 from app.schemas.agent_runs import (
-    AgentTurnResponse,
     ClarificationRequest,
     EvidenceCatalogItem,
     EvidenceVisibility,
@@ -61,20 +56,14 @@ from app.schemas.agent_runs import (
     MemoryParcel,
     NavigationResult,
     PlanCandidate,
-    PlanContext,
-    PlanFocusContext,
     PlanningContext,
     PlanningState,
     ProfileContext,
     ProviderPlanResponse,
-    ProviderUsage,
-    ReviewContext,
     RunInputSnapshot,
-    TaskContext,
     ValidationReport,
 )
-from app.schemas.enums import GoalType, PlanStatus, ReplanMode, RunIntent, TaskStatus
-from app.tools.contracts import ToolContext
+from app.schemas.enums import GoalType, ReplanMode, RunIntent
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -106,64 +95,6 @@ def _factory_binds_single_connection(
     return not isinstance(bind, Engine)
 
 
-def _planning_input_fingerprint(
-    message: str,
-    context: PlanningContext,
-    replan_mode: ReplanMode | str,
-) -> str:
-    """Stable hash of every prompt determinant for the planning node.
-
-    The planning context (profile, window, source plan/review, summaries)
-    plus the request message and replan mode fully determine the LLM
-    input; these are immutable per Run, so a checkpoint from an earlier
-    attempt with a matching fingerprint is safe to reuse.
-    """
-
-    mode = replan_mode.value if isinstance(replan_mode, ReplanMode) else replan_mode
-    encoded = json.dumps(
-        {
-            "message": message,
-            "context": context.model_dump(mode="json"),
-            "replan_mode": mode,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return sha256(encoded).hexdigest()
-
-
-def _as_int(value: object, default: int = 0) -> int:
-    return value if isinstance(value, int) else default
-
-
-def _candidate_checkpoint_payload(
-    output: NodeOutput[
-        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
-    ],
-    state: PlanningState,
-) -> dict[str, object]:
-    candidate, catalog, visibility, tool_round, tool_call_count = output.value
-    telemetry = output.telemetry
-    return {
-        "attempt": _as_int(state.get("attempt_count"), 1),
-        "candidate": candidate.model_dump(mode="json"),
-        "evidence_catalog": [item.model_dump(mode="json") for item in catalog],
-        "visibility": visibility.model_dump(mode="json"),
-        "tool_round": tool_round,
-        "tool_call_count": tool_call_count,
-        "fallback_reason": state.get("fallback_reason"),
-        "usage": {
-            "tokens_in": telemetry.tokens_in,
-            "tokens_out": telemetry.tokens_out,
-            "cost_cny": str(telemetry.cost_cny),
-            "model_id": telemetry.model_id,
-            # Restored telemetry describes no new physical call.
-            "latency_ms": 0,
-        },
-    }
-
-
 class FixedPlanningGraph:
     """Explicit, bounded topology matching the Stage 2 runtime specification."""
 
@@ -177,6 +108,7 @@ class FixedPlanningGraph:
         budget: BudgetGuard,
         tool_registry: ToolRegistry,
         embedding_provider: EmbeddingProvider,
+        context_reader: PlanningContextPort,
     ) -> None:
         self._session_factory = session_factory
         self._checkpoints = CheckpointStore(session_factory)
@@ -195,6 +127,13 @@ class FixedPlanningGraph:
         self._budget = budget
         self._tool_registry = tool_registry
         self._embedding_provider = embedding_provider
+        self._context_reader = context_reader
+        self._candidate_runner = CareerPlanningAgentRunner(
+            session_factory=session_factory,
+            provider=provider,
+            budget=budget,
+            tool_registry=tool_registry,
+        )
         self._graph = self._build_graph()
 
     async def execute(self, state: PlanningState) -> None:
@@ -701,36 +640,16 @@ class FixedPlanningGraph:
             return {"memory_parcel": MemoryParcel()}
         goal_type = intent.effective_goal_type
 
-        blockers: list[str] = []
-        adjustment_request: str | None = None
         async with self._context_db_lock:
-            async with self._session_factory() as session:
-                async with session_transaction(session):
-                    plans = PlanRepository(session)
-                    reviews = ReviewRepository(session)
-                    source_review: Review | None = None
-                    if state["request"].source_review_id is not None:
-                        source_review = await reviews.get_for_user(
-                            state["request"].source_review_id,
-                            state["user_id"],
-                        )
-                    task_rows = await plans.recent_tasks(state["user_id"], limit=30)
-                    blockers = [
-                        task.abandoned_reason_text or task.deliverable
-                        for task in task_rows
-                        if task.state == "abandoned"
-                    ][:10]
-                    if source_review is not None and source_review.blockers:
-                        blockers.insert(0, source_review.blockers)
-                        blockers = list(dict.fromkeys(blockers))[:10]
-                    adjustment_request = (
-                        source_review.adjustment_request if source_review else None
-                    )
+            query_facts = await self._context_reader.load_memory_query_facts(
+                user_id=state["user_id"],
+                source_review_id=state["request"].source_review_id,
+            )
         query = build_memory_query(
             user_message=state["request"].message,
             goal_type=intent.effective_goal_type.value,
-            blockers=blockers,
-            adjustment_request=adjustment_request,
+            blockers=query_facts.blockers,
+            adjustment_request=query_facts.adjustment_request,
         )
         vector: list[float] | None = None
         embed_latency_ms = 0
@@ -754,29 +673,25 @@ class FixedPlanningGraph:
                 retrieval_failed=False,
             )
             try:
-                async with self._session_factory() as session:
-                    async with session_transaction(session):
-                        memory_selection = await select_memories(
-                            repository=EvidenceRepository(session),
-                            embedding_provider=self._embedding_provider,
-                            user_id=state["user_id"],
-                            user_message=state["request"].message,
-                            goal_type=goal_type.value,
-                            blockers=blockers,
-                            adjustment_request=adjustment_request,
-                            semantic_enabled=config.memory_semantic_retrieval_enabled,
-                            retrieval_limit=config.memory_retrieval_limit,
-                            max_items=config.memory_context_max_items,
-                            max_chars=config.memory_context_max_chars,
-                            min_similarity=config.memory_min_similarity,
-                            half_life_days=config.memory_recency_half_life_days,
-                            exclude_categories=(
-                                set(config.exclude_memory_categories)
-                                if config.exclude_memory_categories
-                                else None
-                            ),
-                            precomputed_vector=vector,
-                        )
+                memory_selection = await self._context_reader.select_memories(
+                    user_id=state["user_id"],
+                    user_message=state["request"].message,
+                    goal_type=goal_type.value,
+                    blockers=query_facts.blockers,
+                    adjustment_request=query_facts.adjustment_request,
+                    semantic_enabled=config.memory_semantic_retrieval_enabled,
+                    retrieval_limit=config.memory_retrieval_limit,
+                    max_items=config.memory_context_max_items,
+                    max_chars=config.memory_context_max_chars,
+                    min_similarity=config.memory_min_similarity,
+                    half_life_days=config.memory_recency_half_life_days,
+                    exclude_categories=(
+                        set(config.exclude_memory_categories)
+                        if config.exclude_memory_categories
+                        else None
+                    ),
+                    precomputed_vector=vector,
+                )
             except Exception:
                 memory_selection = memory_selection.__class__(
                     selected=[],
@@ -831,119 +746,16 @@ class FixedPlanningGraph:
         Runs exclusively under the shared context lock so the two fan-out
         branches never interleave transactions on a single connection."""
 
-        async def load() -> HistoryParcel:
-            source_plan: Plan | None = None
-            source_review: Review | None = None
-            recent_tasks: list[TaskContext] = []
-            recent_reviews: list[ReviewContext] = []
-            completed_facts: list[str] = []
-            blockers: list[str] = []
-            interview_training_actions: list[str] = []
-            async with self._session_factory() as session:
-                async with session_transaction(session):
-                    plans = PlanRepository(session)
-                    if state["request"].source_plan_id is not None:
-                        source_plan = await plans.get_for_user(
-                            state["request"].source_plan_id,
-                            state["user_id"],
-                        )
-                    reviews = ReviewRepository(session)
-                    if state["request"].source_review_id is not None:
-                        source_review = await reviews.get_for_user(
-                            state["request"].source_review_id,
-                            state["user_id"],
-                        )
-                        if (
-                            source_review is None
-                            or source_plan is None
-                            or source_review.plan_id != source_plan.id
-                        ):
-                            raise StructuredOutputError(
-                                "source Review and source Plan must belong to the Run user"
-                            )
-                    task_rows = await plans.recent_tasks(state["user_id"], limit=30)
-                    recent_tasks = [
-                        TaskContext(
-                            task_id=task.id,
-                            state=TaskStatus(task.state),
-                            title=task.title,
-                            deliverable=task.deliverable,
-                            scheduled_date=task.scheduled_date,
-                            abandoned_reason=task.abandoned_reason,
-                            abandoned_reason_text=task.abandoned_reason_text,
-                        )
-                        for task in task_rows
-                    ]
-                    completed_facts = [
-                        task.deliverable
-                        for task in task_rows
-                        if task.state == "completed"
-                    ][:20]
-                    blockers = [
-                        task.abandoned_reason_text or task.deliverable
-                        for task in task_rows
-                        if task.state == "abandoned"
-                    ][:10]
-                    if source_plan is not None:
-                        review_rows = await reviews.recent_for_plan(
-                            state["user_id"],
-                            source_plan.id,
-                            limit=7,
-                        )
-                        recent_reviews = [
-                            self._review_context(item) for item in review_rows
-                        ]
-                    if source_review is not None and source_review.blockers:
-                        blockers.insert(0, source_review.blockers)
-                        blockers = list(dict.fromkeys(blockers))[:10]
-                    report_session_id = (
-                        state["request"].source_interview_report_session_id
-                    )
-                    if report_session_id is not None:
-                        report_session = await InterviewRepository(
-                            session
-                        ).get_session(report_session_id, state["user_id"])
-                        if report_session is None or report_session.report_json is None:
-                            raise StructuredOutputError(
-                                "source Interview Report must belong to the Run user"
-                            )
-                        raw_actions = report_session.report_json.get(
-                            "recommended_training_actions", []
-                        )
-                        actions = raw_actions if isinstance(raw_actions, list) else []
-                        interview_training_actions = [
-                            str(item.get("title")) + "：" + str(item.get("deliverable"))
-                            for item in actions
-                            if (
-                                isinstance(item, dict)
-                                and item.get("title")
-                                and item.get("deliverable")
-                                and str(item.get("title")) in state["request"].message
-                            )
-                        ][:3]
-            planning_date = None
-            if source_plan is not None:
-                planning_date = max(
-                    product_today(),
-                    source_plan.plan_date + timedelta(days=7),
-                )
-            return HistoryParcel(
-                source_plan=self._plan_context(source_plan) if source_plan else None,
-                source_review=(
-                    self._review_context(source_review) if source_review else None
-                ),
-                source_plan_id=source_plan.id if source_plan else None,
-                source_plan_version=source_plan.version if source_plan else None,
-                planning_date=planning_date,
-                recent_tasks=recent_tasks,
-                recent_reviews=recent_reviews,
-                completed_facts=completed_facts,
-                blockers=blockers,
-                interview_training_actions=interview_training_actions,
-            )
-
         async def work() -> NodeOutput[dict[str, object]]:
-            parcel = await load()
+            parcel = await self._context_reader.load_history(
+                user_id=state["user_id"],
+                source_plan_id=state["request"].source_plan_id,
+                source_review_id=state["request"].source_review_id,
+                source_interview_report_session_id=(
+                    state["request"].source_interview_report_session_id
+                ),
+                request_message=state["request"].message,
+            )
             if not state["runtime_config"].context_fanout_enabled:
                 # Serial A/B mode: this branch also produces the memory
                 # parcel so the merge node is unchanged.
@@ -972,30 +784,6 @@ class FixedPlanningGraph:
             lock=self._context_db_lock,
         )
 
-    @staticmethod
-    def _plan_context(plan: Plan) -> PlanContext:
-        return PlanContext(
-            plan_id=plan.id,
-            version=plan.version,
-            status=PlanStatus(plan.status),
-            plan_date=plan.plan_date,
-            horizon_start=plan.horizon_start,
-            horizon_end=plan.horizon_end,
-            overall_direction=plan.overall_direction,
-            weekly_focus=[PlanFocusContext.model_validate(item) for item in plan.weekly_focus_json],
-        )
-
-    @staticmethod
-    def _review_context(review: Review) -> ReviewContext:
-        return ReviewContext(
-            review_id=review.id,
-            review_date=review.review_date,
-            blockers=review.blockers,
-            adjustment_request=review.adjustment_request,
-            free_text=review.free_text,
-            replan_reason=review.replan_reason,
-        )
-
     async def _generate_candidate(
         self,
         state: PlanningState,
@@ -1014,7 +802,7 @@ class FixedPlanningGraph:
         deterministic downstream nodes re-run normally.
         """
 
-        fingerprint = _planning_input_fingerprint(
+        fingerprint = planning_input_fingerprint(
             state["request"].message,
             state["planning_context"],
             state["intent"].replan_mode,
@@ -1023,19 +811,25 @@ class FixedPlanningGraph:
             state["run_id"], "career_planning_agent"
         )
         if frozen is not None and frozen.get("input_hash") == fingerprint:
-            restored = self._restore_candidate_checkpoint(frozen, state)
+            restored = restore_candidate_checkpoint(frozen)
             if restored is not None:
-                return restored
+                if restored.fallback_reason is not None:
+                    state["fallback_reason"] = restored.fallback_reason
+                return restored.output
+            logger.debug(
+                "career_planning_agent checkpoint rejected for run %s",
+                state["run_id"],
+            )
 
-        output = await self._generate_candidate_uncached(state, step_id)
+        output = await self._candidate_runner.generate(state, step_id)
         try:
             payload = {
-                **_candidate_checkpoint_payload(output, state),
+                **candidate_checkpoint_payload(output, state),
                 "input_hash": fingerprint,
             }
             await self._checkpoints.save(
                 state["run_id"],
-                _as_int(state.get("attempt_count"), 1),
+                as_int(state.get("attempt_count"), 1),
                 "career_planning_agent",
                 payload,
             )
@@ -1046,315 +840,6 @@ class FixedPlanningGraph:
                 exc_info=True,
             )
         return output
-
-    def _restore_candidate_checkpoint(
-        self,
-        frozen: dict[str, object],
-        state: PlanningState,
-    ) -> NodeOutput[
-        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
-    ] | None:
-        try:
-            candidate = PlanCandidate.model_validate(frozen["candidate"])
-            raw_catalog = frozen["evidence_catalog"]
-            catalog = [
-                EvidenceCatalogItem.model_validate(item)
-                for item in (raw_catalog if isinstance(raw_catalog, list) else [])
-            ]
-            visibility = EvidenceVisibility.model_validate(frozen["visibility"])
-            fallback_reason = frozen.get("fallback_reason")
-            if fallback_reason is not None:
-                state["fallback_reason"] = str(fallback_reason)
-            usage = ProviderUsage.model_validate(frozen["usage"])
-            return NodeOutput(
-                (
-                    candidate,
-                    catalog,
-                    visibility,
-                    _as_int(frozen.get("tool_round")),
-                    _as_int(frozen.get("tool_call_count")),
-                ),
-                NodeTelemetry(
-                    trace_data={
-                        "checkpoint_reused": True,
-                        "checkpoint_attempts_saved": _as_int(frozen.get("attempt")),
-                    },
-                    tokens_in=usage.tokens_in,
-                    tokens_out=usage.tokens_out,
-                    cost_cny=usage.cost_cny,
-                    model_id=usage.model_id,
-                ),
-            )
-        except (KeyError, ValidationError, ValueError):
-            # Corrupt or schema-drifted checkpoint: fall through to a
-            # fresh generation rather than failing the Run.
-            logger.debug(
-                "career_planning_agent checkpoint rejected for run %s",
-                state["run_id"],
-                exc_info=True,
-            )
-            return None
-
-    async def _generate_candidate_uncached(
-        self,
-        state: PlanningState,
-        step_id: UUID,
-    ) -> NodeOutput[
-        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
-    ]:
-        context = state["planning_context"]
-        mode = state["intent"].replan_mode
-        evidence_catalog = list(state.get("evidence_catalog", []))
-        tool_round = state.get("tool_round", 0)
-        tool_call_count = state.get("tool_call_count", 0)
-        total_usage: ProviderUsage | None = None
-        stream_summaries: list[dict[str, object]] = []
-        prompt_version = state["runtime_config"].prompt_versions["career_planning"]
-
-        def _step_telemetry(visibility: EvidenceVisibility) -> NodeTelemetry:
-            # Every return path below follows at least one provider call,
-            # so total_usage is always bound by the time this runs.
-            assert total_usage is not None
-            telemetry = self._telemetry(total_usage, prompt_version, visibility)
-            if stream_summaries:
-                telemetry.trace_data["llm_stream"] = stream_summaries
-            return telemetry
-
-        for turn_index in range(3):
-            force_final = (
-                tool_round >= state["runtime_config"].max_tool_rounds
-                or tool_call_count >= state["runtime_config"].max_tool_calls
-            )
-            available_tools = self._tool_registry.available_specs(
-                intent=state["intent"].intent,
-                requires_fresh_information=state["intent"].requires_fresh_information,
-            )
-            # Deterministic memory pre-execution: when the router detects
-            # past-context references, EXECUTE memory_lookup directly (not
-            # just make it available — the model won't call it voluntarily,
-            # measured ~11% on GLM-4.7). Results go into the evidence
-            # catalog before the LLM call, so the tool_calls table records
-            # the execution and the grader sees it.
-            if (
-                turn_index == 0
-                and not force_final
-                and not state["runtime_config"].memory_disabled
-                and state["intent"].references_past_context
-                and state["intent"].intent in {RunIntent.CREATE_PLAN, RunIntent.REPLAN}
-                and not any(
-                    item.kind == "memory"
-                    for item in evidence_catalog
-                )
-            ):
-                pre_execution = await self._tool_registry.execute(
-                    tool_name="memory_lookup",
-                    arguments={"query": state["request"].message[:200], "limit": 5},
-                    context=ToolContext(
-                        run_id=state["run_id"],
-                        user_id=state["user_id"],
-                        goal_type=context.profile.goal_type,
-                        intent=state["intent"].intent,
-                        requires_fresh_information=(
-                            state["intent"].requires_fresh_information
-                        ),
-                        remaining_deadline_ms=int(self._budget.remaining_seconds() * 1000),
-                    ),
-                    step_id=step_id,
-                    round_number=1,
-                )
-                tool_call_count += 1
-                if pre_execution.success:
-                    for item in pre_execution.result.evidence:
-                        catalog_item = EvidenceCatalogItem.model_validate(
-                            item.model_dump(mode="json")
-                        )
-                        if all(
-                            existing.kind != catalog_item.kind
-                            or existing.id != catalog_item.id
-                            for existing in evidence_catalog
-                        ):
-                            evidence_catalog.append(catalog_item)
-            if force_final:
-                available_tools = []
-            visible_catalog, visibility = build_evidence_visibility(
-                call_id=f"{state['run_id']}:career_planning:{turn_index + 1}",
-                evidence_catalog=evidence_catalog,
-            )
-            # 当本轮没有任何 Tool 时，走更轻量的 generate_plan prompt 路径
-            # （ProviderPlanResponse schema）。带 Tool 时才使用完整的 agent-turn prompt。
-            using_plan_path = not available_tools
-            # Wire-level streaming: bind one throttled progress publisher per
-            # LLM call. Mock/deterministic providers never call the sink, so
-            # evaluation determinism is unchanged.
-            publisher = StreamProgressPublisher(
-                session_factory=self._session_factory,
-                run_id=state["run_id"],
-                node_name="career_planning_agent",
-                turn=turn_index + 1,
-            )
-            with bind_stream_delta_sink(publisher.on_delta):
-                if available_tools:
-                    raw = await self._provider.generate_agent_turn(
-                        message=state["request"].message,
-                        context=context,
-                        replan_mode=mode,
-                        available_tools=available_tools,
-                        evidence_catalog=visible_catalog,
-                        force_final=force_final,
-                    )
-                else:
-                    raw = await self._provider.generate_plan(
-                        message=state["request"].message,
-                        context=context,
-                        replan_mode=mode,
-                        evidence_catalog=visible_catalog,
-                    )
-            stream_summaries.append(publisher.summary())
-            usage = self._extract_usage(raw)
-            self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
-            total_usage = usage if total_usage is None else self._combine_usage(total_usage, usage)
-            try:
-                if using_plan_path:
-                    response = ProviderPlanResponse.model_validate(raw)
-                    candidate = response.candidate
-                    return NodeOutput(
-                        (
-                            candidate,
-                            evidence_catalog,
-                            visibility,
-                            tool_round,
-                            tool_call_count,
-                        ),
-                        _step_telemetry(visibility),
-                    )
-                turn = AgentTurnResponse.model_validate(raw)
-            except ValidationError:
-                self._budget.claim_format_repair()
-                repair_catalog, repair_visibility = build_evidence_visibility(
-                    call_id=f"{state['run_id']}:format_repair",
-                    evidence_catalog=evidence_catalog,
-                )
-                repaired = await self._provider.repair_format(
-                    raw_output=raw,
-                    context=context,
-                    replan_mode=mode,
-                    evidence_catalog=repair_catalog,
-                )
-                repair_usage = self._extract_usage(repaired)
-                self._budget.record_llm_call(
-                    repair_usage.tokens_in,
-                    repair_usage.tokens_out,
-                )
-                total_usage = self._combine_usage(total_usage, repair_usage)
-                prompt_version = state["runtime_config"].prompt_versions["format_repair"]
-                try:
-                    response = ProviderPlanResponse.model_validate(repaired)
-                except ValidationError:
-                    state["fallback_reason"] = "format_repair_failed"
-                    fallback = fallback_candidate(context, mode)
-                    _, fallback_visibility = build_evidence_visibility(
-                        call_id=f"{state['run_id']}:format_fallback",
-                        evidence_catalog=[],
-                    )
-                    return NodeOutput(
-                        (
-                            fallback,
-                            evidence_catalog,
-                            fallback_visibility,
-                            tool_round,
-                            tool_call_count,
-                        ),
-                        _step_telemetry(repair_visibility),
-                    )
-                # Format repair succeeded: the finalized candidate came from
-                # the provider repair call, not the model's first-shot output.
-                state["plan_provenance"] = "format_repair"
-                return NodeOutput(
-                    (
-                        response.candidate,
-                        evidence_catalog,
-                        repair_visibility,
-                        tool_round,
-                        tool_call_count,
-                    ),
-                    _step_telemetry(repair_visibility),
-                )
-            if turn.final is not None:
-                return NodeOutput(
-                    (
-                        turn.final,
-                        evidence_catalog,
-                        visibility,
-                        tool_round,
-                        tool_call_count,
-                    ),
-                    _step_telemetry(visibility),
-                )
-            if force_final:
-                raise StructuredOutputError("Tool requested after Tool budget was exhausted")
-            tool_round += 1
-            # Parallel tool calls: every accepted call in one round runs
-            # concurrently (the registry opens its own session per call).
-            # gather preserves submission order, so evidence collection and
-            # mock determinism are unchanged; a tool failure arrives as a
-            # non-successful ToolExecutionResult, never as an exception.
-            remaining_calls = (
-                state["runtime_config"].max_tool_calls - tool_call_count
-            )
-            accepted = [call for call in turn.tool_calls[:remaining_calls]]
-            tool_call_count += len(accepted)
-            if accepted:
-                deadline_ms = int(self._budget.remaining_seconds() * 1000)
-                tool_context = ToolContext(
-                    run_id=state["run_id"],
-                    user_id=state["user_id"],
-                    goal_type=context.profile.goal_type,
-                    intent=state["intent"].intent,
-                    requires_fresh_information=(state["intent"].requires_fresh_information),
-                    remaining_deadline_ms=deadline_ms,
-                )
-                executions = await asyncio.gather(
-                    *(
-                        self._tool_registry.execute(
-                            tool_name=call.name,
-                            arguments=call.arguments,
-                            context=tool_context,
-                            step_id=step_id,
-                            round_number=tool_round,
-                        )
-                        for call in accepted
-                    )
-                )
-                for execution in executions:
-                    if execution.success:
-                        for item in execution.result.evidence:
-                            catalog_item = EvidenceCatalogItem.model_validate(
-                                item.model_dump(mode="json")
-                            )
-                            if all(
-                                existing.kind != catalog_item.kind
-                                or existing.id != catalog_item.id
-                                for existing in evidence_catalog
-                            ):
-                                evidence_catalog.append(catalog_item)
-        if total_usage is None:
-            raise StructuredOutputError("Agent produced no turn")
-        state["fallback_reason"] = "tool_round_exhausted"
-        fallback = fallback_candidate(context, mode)
-        _, fallback_visibility = build_evidence_visibility(
-            call_id=f"{state['run_id']}:tool_fallback",
-            evidence_catalog=[],
-        )
-        return NodeOutput(
-            (
-                fallback,
-                evidence_catalog,
-                fallback_visibility,
-                tool_round,
-                tool_call_count,
-            ),
-            _step_telemetry(fallback_visibility),
-        )
 
     async def _revise_or_fallback(
         self, state: PlanningState
@@ -1452,7 +937,7 @@ class FixedPlanningGraph:
             replan_mode=state["intent"].replan_mode,
             evidence_catalog=repair_catalog,
         )
-        usage = self._extract_usage(raw)
+        usage = extract_provider_usage(raw)
         self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
         try:
             response = ProviderPlanResponse.model_validate(raw)
@@ -1464,7 +949,7 @@ class FixedPlanningGraph:
             )
             return NodeOutput(
                 (fallback, "business_repair_invalid", fallback_visibility),
-                self._telemetry(
+                build_provider_telemetry(
                     usage,
                     state["runtime_config"].prompt_versions["business_repair"],
                     visibility,
@@ -1475,7 +960,7 @@ class FixedPlanningGraph:
             state["violation_category"] = response.violation_category
         return NodeOutput(
             (response.candidate, None, visibility),
-            self._telemetry(
+            build_provider_telemetry(
                 usage,
                 state["runtime_config"].prompt_versions["business_repair"],
                 visibility,
@@ -1524,61 +1009,6 @@ class FixedPlanningGraph:
     async def _immediate[T](value: T, trace: dict[str, object]) -> NodeOutput[T]:
         return NodeOutput(value, NodeTelemetry(trace_data=trace))
 
-    @staticmethod
-    def _extract_usage(raw: object) -> ProviderUsage:
-        if not isinstance(raw, dict):
-            raise StructuredOutputError
-        try:
-            return ProviderUsage.model_validate(raw.get("usage"))
-        except ValidationError as exc:
-            raise StructuredOutputError from exc
-
-    @staticmethod
-    def _combine_usage(first: ProviderUsage, second: ProviderUsage) -> ProviderUsage:
-        return ProviderUsage(
-            model_id=second.model_id,
-            provider=second.provider,
-            request_id=second.request_id,
-            raw_output_hash=second.raw_output_hash,
-            tokens_in=first.tokens_in + second.tokens_in,
-            tokens_out=first.tokens_out + second.tokens_out,
-            latency_ms=first.latency_ms + second.latency_ms,
-            cost_cny=first.cost_cny + second.cost_cny,
-        )
-
-    @staticmethod
-    def _telemetry(
-        usage: ProviderUsage,
-        prompt_version: str,
-        visibility: EvidenceVisibility,
-    ) -> NodeTelemetry:
-        trace_data: dict[str, object] = {
-            "latency_ms": usage.latency_ms,
-            "provider": usage.provider,
-            "evidence_call_id": visibility.call_id,
-            "evidence_catalog_hash": visibility.catalog_hash,
-            "visible_evidence_refs": [
-                item.model_dump(mode="json") for item in visibility.visible_refs
-            ],
-            "visible_evidence_ids": [str(item.id) for item in visibility.visible_refs],
-            "visible_evidence_count": len(visibility.visible_refs),
-            "truncated_evidence_ids": [str(item.id) for item in visibility.truncated_refs],
-            "truncated_evidence_count": len(visibility.truncated_refs),
-        }
-        if usage.request_id is not None:
-            trace_data["request_id"] = usage.request_id
-        if usage.raw_output_hash is not None:
-            trace_data["raw_output_hash"] = usage.raw_output_hash
-        return NodeTelemetry(
-            trace_data=trace_data,
-            tokens_in=usage.tokens_in,
-            tokens_out=usage.tokens_out,
-            cost_cny=usage.cost_cny,
-            model_id=usage.model_id,
-            prompt_version=prompt_version,
-        )
-
-
 class GraphFactory:
     """Build the fixed Stage 4 graph with an explicit Tool registry."""
 
@@ -1588,11 +1018,15 @@ class GraphFactory:
         provider: PlanningProvider,
         tool_registry: ToolRegistry | None = None,
         embedding_provider: EmbeddingProvider | None = None,
+        context_reader: PlanningContextPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._provider = provider
         self._tool_registry = tool_registry or ToolRegistry()
         self._embedding_provider = embedding_provider or MockEmbeddingProvider()
+        if context_reader is None:
+            raise ValueError("context_reader is required")
+        self._context_reader = context_reader
 
     def build(
         self,
@@ -1609,15 +1043,5 @@ class GraphFactory:
             budget=budget,
             tool_registry=self._tool_registry,
             embedding_provider=self._embedding_provider,
+            context_reader=self._context_reader,
         )
-
-
-async def load_profile(
-    session_factory: async_sessionmaker[AsyncSession], user_id: UUID
-) -> ProfileContext | None:
-    async with session_factory() as session:
-        async with session_transaction(session):
-            profile = await session.get(UserProfile, user_id)
-            if profile is None:
-                return None
-            return ProfileContext.model_validate(profile, from_attributes=True)

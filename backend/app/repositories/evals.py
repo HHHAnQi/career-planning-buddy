@@ -388,6 +388,28 @@ class EvalRepository:
             for pair, judge_result in result.all()
         ]
 
+    async def list_judge_results_by_comparison_groups(
+        self, comparison_group_ids: list[str]
+    ) -> list[EvalPairwiseJudgeResult]:
+        """Batch-load Judge results for calibration report snapshots."""
+
+        if not comparison_group_ids:
+            return []
+        result = await self._session.execute(
+            select(EvalPairwiseJudgeResult)
+            .where(
+                EvalPairwiseJudgeResult.comparison_group_id.in_(
+                    comparison_group_ids
+                )
+            )
+            .order_by(
+                EvalPairwiseJudgeResult.comparison_group_id,
+                EvalPairwiseJudgeResult.pair_id,
+                EvalPairwiseJudgeResult.created_at,
+            )
+        )
+        return list(result.scalars())
+
 
     # ====================================================================
     # PR-9c.2 Calibration workflow repository
@@ -747,6 +769,24 @@ class EvalRepository:
             select(EvalPairwiseHumanAnnotation)
             .where(EvalPairwiseHumanAnnotation.sweep_id == sweep_id)
             .order_by(
+                EvalPairwiseHumanAnnotation.pair_id,
+                EvalPairwiseHumanAnnotation.created_at,
+            )
+        )
+        return list(result.scalars())
+
+    async def list_annotations_by_sweeps(
+        self, sweep_ids: list[UUID]
+    ) -> list[EvalPairwiseHumanAnnotation]:
+        """Batch-load annotations for calibration report snapshots."""
+
+        if not sweep_ids:
+            return []
+        result = await self._session.execute(
+            select(EvalPairwiseHumanAnnotation)
+            .where(EvalPairwiseHumanAnnotation.sweep_id.in_(sweep_ids))
+            .order_by(
+                EvalPairwiseHumanAnnotation.sweep_id,
                 EvalPairwiseHumanAnnotation.pair_id,
                 EvalPairwiseHumanAnnotation.created_at,
             )

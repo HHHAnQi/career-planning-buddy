@@ -25,6 +25,7 @@ if [[ "$backend_python" == *.exe ]]; then
 fi
 "$backend_python" -m ruff check .
 "$backend_python" -m mypy app tests scripts evals
+"$backend_python" -m scripts.audit_public_claims
 "$backend_python" -m alembic upgrade head
 "$backend_python" -m alembic check
 "$backend_python" -m pytest

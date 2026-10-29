@@ -709,6 +709,16 @@ async def test_calibration_report_latest_and_history(db_session: AsyncSession) -
     assert len(history) == 3
 
 
+@pytest.mark.asyncio
+async def test_calibration_snapshot_batch_queries_accept_empty_inputs(
+    db_session: AsyncSession,
+) -> None:
+    repository = EvalRepository(db_session)
+
+    assert await repository.list_judge_results_by_comparison_groups([]) == []
+    assert await repository.list_annotations_by_sweeps([]) == []
+
+
 # ===========================================================================
 # PR-9c.2 supplementary checks (Commit 2 conditional-pass resolution):
 # #3  completed item MUST carry judge_result_id (DDL CHECK enforced)

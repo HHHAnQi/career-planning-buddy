@@ -46,6 +46,9 @@ try {
         "-m", "mypy", "app", "tests", "scripts", "evals"
     )
     Invoke-Checked -Executable $backendPython -CommandArguments @(
+        "-m", "scripts.audit_public_claims"
+    )
+    Invoke-Checked -Executable $backendPython -CommandArguments @(
         "-m", "alembic", "upgrade", "head"
     )
     Invoke-Checked -Executable $backendPython -CommandArguments @(

@@ -1,6 +1,12 @@
 # Current System Overview
 
-> 当前系统事实文档。代码、Alembic 迁移和测试是最终依据；历史设计与审查文档只描述对应时间点的状态。
+> Status: CURRENT
+>
+> Last verified: 2026-10-29
+>
+> Authority: 当前默认分支代码、Alembic 迁移和测试是最终依据。
+>
+> 历史设计与审查文档只描述对应时间点的状态。
 
 ## 产品边界
 

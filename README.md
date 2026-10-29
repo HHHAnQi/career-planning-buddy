@@ -115,12 +115,14 @@ flowchart LR
 
 | 验证项 | 结果 |
 | --- | ---: |
-| Stage 5 真实 Provider 硬门禁通过率 | **72.2% → 88.9%** |
+| Stage 5 真实 Provider 硬门禁通过率 | 历史基线 72.2% → **88.9%** |
 | 硬门禁 Wilson 95% CI | **[80.7%, 93.9%]** |
-| 真实 Provider 延迟 P95 | **45.5s → 28.6s** |
+| 真实 Provider 延迟 P95 | 历史基线 45.5s → **28.9s** |
 | 转述硬化检索集 Hybrid Recall@5 / MRR | **1.00 / 0.95** |
-| 自动化测试 | **814 项后端 + 36 项前端** |
+| 冻结发布样本 | **90 次匿名 Trial** |
+| 自动化验证 | Pytest + Vitest，当前数量以 CI 结果为准 |
 
+当前 88.9% 和 28.9s 来自冻结证据包；72.2% 和 45.5s 为早期实验的历史对比基线。
 完整的 90 次匿名 Trial、逐项 Grader、失败分解、冻结配置与 SHA256 校验和位于
 [`backend/evals/releases/v0.3-hardgate-88.9/`](backend/evals/releases/v0.3-hardgate-88.9/)。
 
