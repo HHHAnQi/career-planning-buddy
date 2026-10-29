@@ -715,7 +715,10 @@ async def create_calibration_report(
     reviewer: Annotated[AuthenticatedUser, Depends(require_dev)],
     session: Annotated[AsyncSession, Depends(get_db_session, use_cache=False)],
 ) -> PairwiseCalibrationReportResponse:
-    """Generate or idempotently reuse a calibration report."""
+    """Generate or reuse a calibration report.
+
+    Caller MUST specify exact ``sweep_ids`` (supplementary constraint #7)
+    and all sweeps MUST share the same judge identity."""
 
     status, report = await PairwiseCalibrationService(
         session
