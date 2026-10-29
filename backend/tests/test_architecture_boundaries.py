@@ -26,3 +26,29 @@ def test_api_modules_do_not_execute_sqlalchemy_queries() -> None:
                 violations.append(f"{path.name}:{node.lineno}: session.execute")
 
     assert violations == []
+
+
+def test_planning_runtime_support_remains_pure() -> None:
+    """Runtime transformations must not grow orchestration or I/O dependencies."""
+
+    path = BACKEND_ROOT / "app/agent/runtime_support.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    forbidden_prefixes = (
+        "app.agent.graph",
+        "app.core.database",
+        "app.models",
+        "app.providers",
+        "app.repositories",
+        "sqlalchemy",
+    )
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            if node.module.startswith(forbidden_prefixes):
+                violations.append(f"{node.module}:{node.lineno}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(forbidden_prefixes):
+                    violations.append(f"{alias.name}:{node.lineno}")
+
+    assert violations == []

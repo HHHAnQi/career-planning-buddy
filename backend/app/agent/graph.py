@@ -1,10 +1,8 @@
 """Fixed Stage 4 planning/replanning graph topology and node orchestration."""
 
 import asyncio
-import json
 import logging
 from datetime import timedelta
-from hashlib import sha256
 from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
@@ -30,6 +28,15 @@ from app.agent.nodes import (
     validate_candidate,
 )
 from app.agent.ports import PlanningResultPort
+from app.agent.runtime_support import (
+    as_int,
+    build_provider_telemetry,
+    candidate_checkpoint_payload,
+    combine_provider_usage,
+    extract_provider_usage,
+    planning_input_fingerprint,
+    restore_candidate_checkpoint,
+)
 from app.core.database import session_transaction
 from app.core.metrics import AGENT_REPAIR_PATH, AGENT_UNKNOWN_RULE, make_labels
 from app.core.time import product_today
@@ -104,64 +111,6 @@ def _factory_binds_single_connection(
     from sqlalchemy.engine import Engine
 
     return not isinstance(bind, Engine)
-
-
-def _planning_input_fingerprint(
-    message: str,
-    context: PlanningContext,
-    replan_mode: ReplanMode | str,
-) -> str:
-    """Stable hash of every prompt determinant for the planning node.
-
-    The planning context (profile, window, source plan/review, summaries)
-    plus the request message and replan mode fully determine the LLM
-    input; these are immutable per Run, so a checkpoint from an earlier
-    attempt with a matching fingerprint is safe to reuse.
-    """
-
-    mode = replan_mode.value if isinstance(replan_mode, ReplanMode) else replan_mode
-    encoded = json.dumps(
-        {
-            "message": message,
-            "context": context.model_dump(mode="json"),
-            "replan_mode": mode,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return sha256(encoded).hexdigest()
-
-
-def _as_int(value: object, default: int = 0) -> int:
-    return value if isinstance(value, int) else default
-
-
-def _candidate_checkpoint_payload(
-    output: NodeOutput[
-        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
-    ],
-    state: PlanningState,
-) -> dict[str, object]:
-    candidate, catalog, visibility, tool_round, tool_call_count = output.value
-    telemetry = output.telemetry
-    return {
-        "attempt": _as_int(state.get("attempt_count"), 1),
-        "candidate": candidate.model_dump(mode="json"),
-        "evidence_catalog": [item.model_dump(mode="json") for item in catalog],
-        "visibility": visibility.model_dump(mode="json"),
-        "tool_round": tool_round,
-        "tool_call_count": tool_call_count,
-        "fallback_reason": state.get("fallback_reason"),
-        "usage": {
-            "tokens_in": telemetry.tokens_in,
-            "tokens_out": telemetry.tokens_out,
-            "cost_cny": str(telemetry.cost_cny),
-            "model_id": telemetry.model_id,
-            # Restored telemetry describes no new physical call.
-            "latency_ms": 0,
-        },
-    }
 
 
 class FixedPlanningGraph:
@@ -1014,7 +963,7 @@ class FixedPlanningGraph:
         deterministic downstream nodes re-run normally.
         """
 
-        fingerprint = _planning_input_fingerprint(
+        fingerprint = planning_input_fingerprint(
             state["request"].message,
             state["planning_context"],
             state["intent"].replan_mode,
@@ -1023,19 +972,25 @@ class FixedPlanningGraph:
             state["run_id"], "career_planning_agent"
         )
         if frozen is not None and frozen.get("input_hash") == fingerprint:
-            restored = self._restore_candidate_checkpoint(frozen, state)
+            restored = restore_candidate_checkpoint(frozen)
             if restored is not None:
-                return restored
+                if restored.fallback_reason is not None:
+                    state["fallback_reason"] = restored.fallback_reason
+                return restored.output
+            logger.debug(
+                "career_planning_agent checkpoint rejected for run %s",
+                state["run_id"],
+            )
 
         output = await self._generate_candidate_uncached(state, step_id)
         try:
             payload = {
-                **_candidate_checkpoint_payload(output, state),
+                **candidate_checkpoint_payload(output, state),
                 "input_hash": fingerprint,
             }
             await self._checkpoints.save(
                 state["run_id"],
-                _as_int(state.get("attempt_count"), 1),
+                as_int(state.get("attempt_count"), 1),
                 "career_planning_agent",
                 payload,
             )
@@ -1046,54 +1001,6 @@ class FixedPlanningGraph:
                 exc_info=True,
             )
         return output
-
-    def _restore_candidate_checkpoint(
-        self,
-        frozen: dict[str, object],
-        state: PlanningState,
-    ) -> NodeOutput[
-        tuple[PlanCandidate, list[EvidenceCatalogItem], EvidenceVisibility, int, int]
-    ] | None:
-        try:
-            candidate = PlanCandidate.model_validate(frozen["candidate"])
-            raw_catalog = frozen["evidence_catalog"]
-            catalog = [
-                EvidenceCatalogItem.model_validate(item)
-                for item in (raw_catalog if isinstance(raw_catalog, list) else [])
-            ]
-            visibility = EvidenceVisibility.model_validate(frozen["visibility"])
-            fallback_reason = frozen.get("fallback_reason")
-            if fallback_reason is not None:
-                state["fallback_reason"] = str(fallback_reason)
-            usage = ProviderUsage.model_validate(frozen["usage"])
-            return NodeOutput(
-                (
-                    candidate,
-                    catalog,
-                    visibility,
-                    _as_int(frozen.get("tool_round")),
-                    _as_int(frozen.get("tool_call_count")),
-                ),
-                NodeTelemetry(
-                    trace_data={
-                        "checkpoint_reused": True,
-                        "checkpoint_attempts_saved": _as_int(frozen.get("attempt")),
-                    },
-                    tokens_in=usage.tokens_in,
-                    tokens_out=usage.tokens_out,
-                    cost_cny=usage.cost_cny,
-                    model_id=usage.model_id,
-                ),
-            )
-        except (KeyError, ValidationError, ValueError):
-            # Corrupt or schema-drifted checkpoint: fall through to a
-            # fresh generation rather than failing the Run.
-            logger.debug(
-                "career_planning_agent checkpoint rejected for run %s",
-                state["run_id"],
-                exc_info=True,
-            )
-            return None
 
     async def _generate_candidate_uncached(
         self,
@@ -1115,7 +1022,7 @@ class FixedPlanningGraph:
             # Every return path below follows at least one provider call,
             # so total_usage is always bound by the time this runs.
             assert total_usage is not None
-            telemetry = self._telemetry(total_usage, prompt_version, visibility)
+            telemetry = build_provider_telemetry(total_usage, prompt_version, visibility)
             if stream_summaries:
                 telemetry.trace_data["llm_stream"] = stream_summaries
             return telemetry
@@ -1210,9 +1117,11 @@ class FixedPlanningGraph:
                         evidence_catalog=visible_catalog,
                     )
             stream_summaries.append(publisher.summary())
-            usage = self._extract_usage(raw)
+            usage = extract_provider_usage(raw)
             self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
-            total_usage = usage if total_usage is None else self._combine_usage(total_usage, usage)
+            total_usage = (
+                usage if total_usage is None else combine_provider_usage(total_usage, usage)
+            )
             try:
                 if using_plan_path:
                     response = ProviderPlanResponse.model_validate(raw)
@@ -1240,12 +1149,12 @@ class FixedPlanningGraph:
                     replan_mode=mode,
                     evidence_catalog=repair_catalog,
                 )
-                repair_usage = self._extract_usage(repaired)
+                repair_usage = extract_provider_usage(repaired)
                 self._budget.record_llm_call(
                     repair_usage.tokens_in,
                     repair_usage.tokens_out,
                 )
-                total_usage = self._combine_usage(total_usage, repair_usage)
+                total_usage = combine_provider_usage(total_usage, repair_usage)
                 prompt_version = state["runtime_config"].prompt_versions["format_repair"]
                 try:
                     response = ProviderPlanResponse.model_validate(repaired)
@@ -1452,7 +1361,7 @@ class FixedPlanningGraph:
             replan_mode=state["intent"].replan_mode,
             evidence_catalog=repair_catalog,
         )
-        usage = self._extract_usage(raw)
+        usage = extract_provider_usage(raw)
         self._budget.record_llm_call(usage.tokens_in, usage.tokens_out)
         try:
             response = ProviderPlanResponse.model_validate(raw)
@@ -1464,7 +1373,7 @@ class FixedPlanningGraph:
             )
             return NodeOutput(
                 (fallback, "business_repair_invalid", fallback_visibility),
-                self._telemetry(
+                build_provider_telemetry(
                     usage,
                     state["runtime_config"].prompt_versions["business_repair"],
                     visibility,
@@ -1475,7 +1384,7 @@ class FixedPlanningGraph:
             state["violation_category"] = response.violation_category
         return NodeOutput(
             (response.candidate, None, visibility),
-            self._telemetry(
+            build_provider_telemetry(
                 usage,
                 state["runtime_config"].prompt_versions["business_repair"],
                 visibility,
@@ -1523,61 +1432,6 @@ class FixedPlanningGraph:
     @staticmethod
     async def _immediate[T](value: T, trace: dict[str, object]) -> NodeOutput[T]:
         return NodeOutput(value, NodeTelemetry(trace_data=trace))
-
-    @staticmethod
-    def _extract_usage(raw: object) -> ProviderUsage:
-        if not isinstance(raw, dict):
-            raise StructuredOutputError
-        try:
-            return ProviderUsage.model_validate(raw.get("usage"))
-        except ValidationError as exc:
-            raise StructuredOutputError from exc
-
-    @staticmethod
-    def _combine_usage(first: ProviderUsage, second: ProviderUsage) -> ProviderUsage:
-        return ProviderUsage(
-            model_id=second.model_id,
-            provider=second.provider,
-            request_id=second.request_id,
-            raw_output_hash=second.raw_output_hash,
-            tokens_in=first.tokens_in + second.tokens_in,
-            tokens_out=first.tokens_out + second.tokens_out,
-            latency_ms=first.latency_ms + second.latency_ms,
-            cost_cny=first.cost_cny + second.cost_cny,
-        )
-
-    @staticmethod
-    def _telemetry(
-        usage: ProviderUsage,
-        prompt_version: str,
-        visibility: EvidenceVisibility,
-    ) -> NodeTelemetry:
-        trace_data: dict[str, object] = {
-            "latency_ms": usage.latency_ms,
-            "provider": usage.provider,
-            "evidence_call_id": visibility.call_id,
-            "evidence_catalog_hash": visibility.catalog_hash,
-            "visible_evidence_refs": [
-                item.model_dump(mode="json") for item in visibility.visible_refs
-            ],
-            "visible_evidence_ids": [str(item.id) for item in visibility.visible_refs],
-            "visible_evidence_count": len(visibility.visible_refs),
-            "truncated_evidence_ids": [str(item.id) for item in visibility.truncated_refs],
-            "truncated_evidence_count": len(visibility.truncated_refs),
-        }
-        if usage.request_id is not None:
-            trace_data["request_id"] = usage.request_id
-        if usage.raw_output_hash is not None:
-            trace_data["raw_output_hash"] = usage.raw_output_hash
-        return NodeTelemetry(
-            trace_data=trace_data,
-            tokens_in=usage.tokens_in,
-            tokens_out=usage.tokens_out,
-            cost_cny=usage.cost_cny,
-            model_id=usage.model_id,
-            prompt_version=prompt_version,
-        )
-
 
 class GraphFactory:
     """Build the fixed Stage 4 graph with an explicit Tool registry."""
