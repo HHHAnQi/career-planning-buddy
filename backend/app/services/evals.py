@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import session_transaction
 from app.core.exceptions import AppError
+from app.harness.errors import EvalFailureCode
 from app.harness.provider_calls.repository import ProviderCallRepository
 from app.models.agent_run import AgentRun
 from app.models.eval import (
@@ -52,6 +53,8 @@ EXPERIMENT_TRANSITIONS: dict[str, set[str]] = {
     "failed": set(),
     "cancelled": set(),
 }
+
+_PROCESS_INTERRUPTED_CODE = EvalFailureCode.PROCESS_INTERRUPTED.value
 
 
 class EvalService:
@@ -319,6 +322,28 @@ class EvalService:
             experiment.status = target_status
             await self._session.flush()
             return experiment
+
+    async def recover_interrupted_experiments(self) -> int:
+        """Fail stranded Eval work while retaining precise Trial crash evidence.
+
+        Eval Trials can create business Runs and provider cost, so startup recovery
+        deliberately does not retry them. A developer must create a new Experiment
+        after inspecting the failed one.
+        """
+
+        async with session_transaction(self._session):
+            experiments = await self._evals.list_running_experiments_for_update()
+            recovered_at = datetime.now(UTC)
+            for experiment in experiments:
+                await self._evals.finalize_interrupted_trials(
+                    experiment.id,
+                    finished_at=recovered_at,
+                    error_code=_PROCESS_INTERRUPTED_CODE,
+                )
+                experiment.status = "failed"
+                experiment.finished_at = recovered_at
+            await self._session.flush()
+            return len(experiments)
 
     async def add_grade(self, trial_id: UUID, result: GradeResult) -> EvalScore:
         async with session_transaction(self._session):

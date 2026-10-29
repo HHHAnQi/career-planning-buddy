@@ -1,4 +1,4 @@
-"""Background executor for Eval V2 experiments.
+"""Single-worker background executor for Eval V2 experiments.
 
 Mirrors ``AgentRunExecutor``'s in-process ``asyncio.create_task`` discipline:
 ``EvalService.create_experiment`` (synchronously, in the request session)
@@ -6,8 +6,8 @@ inserts the ``EvalExperiment`` + ``EvalTrial`` rows, then the HTTP handler
 calls ``submit()`` here; the spawned coroutine opens its own sessions via
 ``self._session_factory`` and drives ``ExperimentRunner.run_experiment_and_grade``.
 
-No multi-worker reliability is claimed (same contract as ``AgentRunExecutor``).
-Recovery on startup marks any ``running`` experiment ``failed`` because
+No multi-worker reliability or automatic replay is claimed. Unlike the durable
+``AgentRunExecutor``, recovery marks any ``running`` experiment ``failed`` because
 ``ExperimentRunner`` itself is stateless and cannot resume mid-Trial.
 """
 
@@ -18,24 +18,15 @@ import logging
 from collections.abc import Callable
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
-from app.core.database import AsyncSessionFactory, session_transaction
-from app.core.exceptions import AppError
-from app.harness.errors import EvalFailureCode
-from app.models.eval import EvalExperiment
+from app.core.database import AsyncSessionFactory
 from app.services.evals import EvalService
 from evals.v2.dataset_loader import DatasetBundle
 from evals.v2.experiment_runner import ExperimentRunner
 
 logger = logging.getLogger(__name__)
-
-# Failure code stamped onto Trials stranded mid-flight when the process
-# crashed and ``EvalRunnerExecutor.recover_interrupted`` runs.
-_PROCESS_INTERRUPTED_CODE: str = EvalFailureCode.PROCESS_INTERRUPTED.value
-
 
 class EvalRunnerExecutor:
     """Drives one Eval experiment per asyncio Task in-process."""
@@ -108,39 +99,7 @@ class EvalRunnerExecutor:
         """
 
         async with self._session_factory() as session:
-            async with session_transaction(session):
-                rows = list(
-                    (
-                        await session.scalars(
-                            select(EvalExperiment).where(
-                                EvalExperiment.status == "running"
-                            )
-                        )
-                    ).all()
-                )
-                service = EvalService(session)
-                for exp in rows:
-                    try:
-                        await service.transition_experiment(exp.id, "failed")
-                    except AppError:
-                        # Illegal transition (rare race) -- never block startup.
-                        continue
-                    # Preserve the DB lifecycle contract during recovery:
-                    # work that never started is cancelled, while in-flight
-                    # work is failed. Both retain the interrupt reason.
-                    trials = await service._evals.list_trials(exp.id)  # noqa: SLF001
-                    for trial in trials:
-                        if trial.status == "pending":
-                            trial.status = "cancelled"
-                        elif trial.status == "running":
-                            trial.status = "failed"
-                        else:
-                            continue
-                        if not trial.error_code:
-                            trial.error_code = (
-                                _PROCESS_INTERRUPTED_CODE
-                            )
-        return len(rows)
+            return await EvalService(session).recover_interrupted_experiments()
 
     async def shutdown(self) -> None:
         """Cancel and await every outstanding task on application shutdown."""

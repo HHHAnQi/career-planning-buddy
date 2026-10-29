@@ -67,6 +67,17 @@ class EvalRepository:
         result = await self._session.execute(statement)
         return list(result.scalars())
 
+    async def list_running_experiments_for_update(self) -> list[EvalExperiment]:
+        """Lock every interrupted Experiment during single-worker startup recovery."""
+
+        result = await self._session.execute(
+            select(EvalExperiment)
+            .where(EvalExperiment.status == "running")
+            .order_by(EvalExperiment.created_at, EvalExperiment.id)
+            .with_for_update()
+        )
+        return list(result.scalars())
+
     async def create_trials(self, trials: Sequence[EvalTrial]) -> list[EvalTrial]:
         self._session.add_all(trials)
         await self._session.flush()
@@ -194,6 +205,36 @@ class EvalRepository:
                 error_code=error_code,
                 error_message=error_message,
             )
+        )
+
+    async def finalize_interrupted_trials(
+        self,
+        experiment_id: UUID,
+        *,
+        finished_at: datetime,
+        error_code: str,
+    ) -> None:
+        """Preserve crash evidence without pretending an interrupted Trial resumed."""
+
+        common_values = {
+            "finished_at": finished_at,
+            "error_code": func.coalesce(EvalTrial.error_code, error_code),
+        }
+        await self._session.execute(
+            update(EvalTrial)
+            .where(
+                EvalTrial.experiment_id == experiment_id,
+                EvalTrial.status == "pending",
+            )
+            .values(status="cancelled", **common_values)
+        )
+        await self._session.execute(
+            update(EvalTrial)
+            .where(
+                EvalTrial.experiment_id == experiment_id,
+                EvalTrial.status == "running",
+            )
+            .values(status="failed", **common_values)
         )
 
     async def create_score(self, score: EvalScore) -> EvalScore:
