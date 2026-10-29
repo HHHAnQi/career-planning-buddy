@@ -7,4 +7,4 @@
 - [x] 增加纯逻辑单元测试和依赖方向守卫。
 - [x] 聚焦回归：49 passed。
 - [x] 全量后端回归：827 passed；1 个 usage-report 用例受本地复用测试库的 30 天外历史数据影响，交由干净 CI 数据库复验。
-- [ ] 远程 CI 验证。
+- [x] 远程 CI 验证：GitHub Actions run `40830938458` 的 Backend 与 Frontend 均通过。
