@@ -105,16 +105,30 @@ def test_eval_executor_delegates_recovery_persistence_to_service() -> None:
 
     path = BACKEND_ROOT / "app/agent/eval_executor.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    forbidden_prefixes = ("app.models", "app.repositories", "sqlalchemy")
+    forbidden_prefixes = ("app.models", "app.repositories")
+    statement_names = {"delete", "insert", "select", "update"}
+    direct_session_calls = {"execute", "get", "scalar", "scalars"}
     violations: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module is not None:
             if node.module.startswith(forbidden_prefixes):
                 violations.append(f"{node.module}:{node.lineno}")
+            if node.module == "sqlalchemy" and {
+                alias.name for alias in node.names
+            } & statement_names:
+                violations.append(f"SQL statement import:{node.lineno}")
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.startswith(forbidden_prefixes):
                     violations.append(f"{alias.name}:{node.lineno}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in direct_session_calls
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "session"
+        ):
+            violations.append(f"session.{node.func.attr}:{node.lineno}")
 
     assert violations == []
 
