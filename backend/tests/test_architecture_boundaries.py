@@ -100,6 +100,25 @@ def test_planning_context_service_delegates_persistence_to_repositories() -> Non
     assert violations == []
 
 
+def test_eval_executor_delegates_recovery_persistence_to_service() -> None:
+    """The process-lifecycle adapter must not own Eval SQL or ORM recovery."""
+
+    path = BACKEND_ROOT / "app/agent/eval_executor.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    forbidden_prefixes = ("app.models", "app.repositories", "sqlalchemy")
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            if node.module.startswith(forbidden_prefixes):
+                violations.append(f"{node.module}:{node.lineno}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(forbidden_prefixes):
+                    violations.append(f"{alias.name}:{node.lineno}")
+
+    assert violations == []
+
+
 def test_planning_graph_delegates_provider_and_tool_loop() -> None:
     """Provider turns and Tool execution belong to CareerPlanningAgentRunner."""
 

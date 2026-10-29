@@ -218,12 +218,8 @@ async def test_cancel_marks_request_then_recovers_as_failed_with_interrupt_code(
     path overrides a pending cancel request with PROCESS_INTERRUPTED +
     failed status, so a process crash is never masked as a clean cancel.
 
-    The production ``EvalRunnerExecutor.recover_interrupted`` opens its
-    own session via the global ``AsyncSessionFactory``; tests can't share
-    that scope (the global factory binds to the live engine, not the
-    test's rolled-back connection). We inline the recover-logic of
-    transition-to-failed + stamp PROCESS_INTERRUPTED on stranded Trials
-    so the assertion is structural rather than executor-bound.
+    The Service owns the recovery use case, so this test exercises the same
+    transaction and Repository boundary used by ``EvalRunnerExecutor``.
     """
 
     dev_token = await _dev_login(api_client, db_session)
@@ -256,20 +252,10 @@ async def test_cancel_marks_request_then_recovers_as_failed_with_interrupt_code(
     assert body["cancel_requested_at"] is not None
     assert body["status"] == "running"  # not promoted synchronously
 
-    # Simulate recover_interrupted: experiment -> failed, every non-
-    # terminal Trial -> failed PROCESS_INTERRUPTED.
-    await service.transition_experiment(eid, "failed")
-    await db_session.flush()
+    assert await service.recover_interrupted_experiments() == 1
     refreshed = await repo.get_experiment(eid)
     assert refreshed is not None
     assert refreshed.status == "failed"  # not cancelled (crash priority)
-    stranded = await repo.list_trials(eid)
-    for trial in stranded:
-        if trial.status in {"pending", "running"}:
-            trial.status = "failed"
-            if not trial.error_code:
-                trial.error_code = "PROCESS_INTERRUPTED"
-    await db_session.flush()
 
     # Final assertion: the stranded Trials now carry PROCESS_INTERRUPTED,
     # which the stats taxonomy classifies as a HARNESS runtime failure

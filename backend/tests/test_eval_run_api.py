@@ -322,7 +322,7 @@ async def test_eval_executor_recovers_pending_and_running_trials(
         expire_on_commit=False,
         join_transaction_mode="create_savepoint",
     )
-    bundle = filter_cases(load_dataset(), ["create-01", "create-02"])
+    bundle = filter_cases(load_dataset(), ["create-01", "create-02", "create-03"])
 
     async with session_factory() as session:
         experiment, trials = await EvalService(session).create_experiment(
@@ -334,6 +334,7 @@ async def test_eval_executor_recovers_pending_and_running_trials(
             trials[1].id,
             started_at=datetime.now(UTC),
         )
+        trials[2].error_code = "EXISTING_DIAGNOSTIC"
         await session.commit()
 
     executor = EvalRunnerExecutor(
@@ -350,10 +351,16 @@ async def test_eval_executor_recovers_pending_and_running_trials(
 
     assert recovered_experiment is not None
     assert recovered_experiment.status == "failed"
-    assert [trial.status for trial in recovered_trials] == ["cancelled", "failed"]
-    assert {trial.error_code for trial in recovered_trials} == {
-        "PROCESS_INTERRUPTED"
-    }
+    assert [trial.status for trial in recovered_trials] == [
+        "cancelled",
+        "failed",
+        "cancelled",
+    ]
+    assert [trial.error_code for trial in recovered_trials] == [
+        "PROCESS_INTERRUPTED",
+        "PROCESS_INTERRUPTED",
+        "EXISTING_DIAGNOSTIC",
+    ]
 
 
 @pytest.mark.asyncio
