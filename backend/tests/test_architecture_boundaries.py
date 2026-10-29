@@ -77,6 +77,29 @@ def test_planning_graph_does_not_query_context_repositories() -> None:
     assert violations == []
 
 
+def test_planning_context_service_delegates_persistence_to_repositories() -> None:
+    """The context use case may coordinate repositories but must not query ORM directly."""
+
+    path = BACKEND_ROOT / "app/services/planning_context.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    forbidden_modules = {"app.models.user_profile", "sqlalchemy"}
+    direct_session_calls = {"execute", "get", "scalar", "scalars"}
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in forbidden_modules:
+            violations.append(f"{node.module}:{node.lineno}")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in direct_session_calls
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "session"
+        ):
+            violations.append(f"session.{node.func.attr}:{node.lineno}")
+
+    assert violations == []
+
+
 def test_planning_graph_delegates_provider_and_tool_loop() -> None:
     """Provider turns and Tool execution belong to CareerPlanningAgentRunner."""
 
