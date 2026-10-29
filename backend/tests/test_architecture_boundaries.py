@@ -66,6 +66,7 @@ def test_planning_graph_does_not_query_context_repositories() -> None:
         "app.repositories.reviews",
         "app.models.plan",
         "app.models.review",
+        "app.models.user_profile",
     }
     violations = [
         f"{node.module}:{node.lineno}"

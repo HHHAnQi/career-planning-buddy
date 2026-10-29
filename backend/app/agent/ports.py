@@ -12,6 +12,7 @@ from app.schemas.agent_runs import (
     HistoryParcel,
     NavigationResult,
     PlanCandidate,
+    ProfileContext,
     SafeResponse,
 )
 
@@ -26,6 +27,8 @@ class MemoryQueryFacts:
 
 class PlanningContextPort(Protocol):
     """Read-only persistence boundary for context loader graph nodes."""
+
+    async def load_profile(self, *, user_id: UUID) -> ProfileContext | None: ...
 
     async def load_memory_query_facts(
         self,

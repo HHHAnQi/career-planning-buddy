@@ -19,7 +19,7 @@ from app.agent.errors import (
     RunCancelledError,
 )
 from app.agent.finalizer import AgentRunFinalizer
-from app.agent.graph import GraphFactory, load_profile
+from app.agent.graph import GraphFactory
 from app.agent.interview_graph import InterviewGraph
 from app.agent.node_runner import NodeRunner
 from app.agent.resume_optimization_graph import ResumeOptimizationGraph
@@ -286,21 +286,22 @@ class AgentRunExecutor:
                     }
                 )
                 return
+            context_reader = PlanningContextService(
+                self._session_factory,
+                self._embedding_provider,
+            )
             graph = GraphFactory(
                 self._session_factory,
                 self._provider,
                 self._tool_registry,
                 self._embedding_provider,
-                PlanningContextService(
-                    self._session_factory,
-                    self._embedding_provider,
-                ),
+                context_reader,
             ).build(
                 node_runner=runner,
                 finalizer=finalizer,
                 budget=budget,
             )
-            profile = await load_profile(self._session_factory, run.user_id)
+            profile = await context_reader.load_profile(user_id=run.user_id)
             state: PlanningState = {
                 "run_id": run.id,
                 "user_id": run.user_id,

@@ -12,6 +12,7 @@ from app.core.database import session_transaction
 from app.core.time import product_today
 from app.models.plan import Plan
 from app.models.review import Review
+from app.models.user_profile import UserProfile
 from app.providers.embedding import EmbeddingProvider
 from app.repositories.evidence import EvidenceRepository
 from app.repositories.interviews import InterviewRepository
@@ -21,6 +22,7 @@ from app.schemas.agent_runs import (
     HistoryParcel,
     PlanContext,
     PlanFocusContext,
+    ProfileContext,
     ReviewContext,
     TaskContext,
 )
@@ -252,3 +254,10 @@ class PlanningContextService:
             free_text=review.free_text,
             replan_reason=review.replan_reason,
         )
+    async def load_profile(self, *, user_id: UUID) -> ProfileContext | None:
+        async with self._session_factory() as session:
+            async with session_transaction(session):
+                profile = await session.get(UserProfile, user_id)
+                if profile is None:
+                    return None
+                return ProfileContext.model_validate(profile, from_attributes=True)

@@ -44,7 +44,6 @@ from app.harness.events import EventRecorder
 from app.harness.evidence import build_evidence_visibility
 from app.harness.snapshots import SnapshotService
 from app.models.agent_run import AgentRun
-from app.models.user_profile import UserProfile
 from app.providers.embedding import EmbeddingProvider, MockEmbeddingProvider
 from app.providers.llm import PlanningProvider
 from app.schemas.agent_runs import (
@@ -1046,14 +1045,3 @@ class GraphFactory:
             embedding_provider=self._embedding_provider,
             context_reader=self._context_reader,
         )
-
-
-async def load_profile(
-    session_factory: async_sessionmaker[AsyncSession], user_id: UUID
-) -> ProfileContext | None:
-    async with session_factory() as session:
-        async with session_transaction(session):
-            profile = await session.get(UserProfile, user_id)
-            if profile is None:
-                return None
-            return ProfileContext.model_validate(profile, from_attributes=True)
