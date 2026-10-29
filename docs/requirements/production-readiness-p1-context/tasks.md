@@ -6,4 +6,4 @@
 - [x] 保留并行 fan-out 和单连接测试锁语义。
 - [x] 增加架构依赖守卫。
 - [x] 聚焦回归：21 passed（架构、fan-out、Review/Replan、Memory Selection、Checkpoint）。
-- [ ] 完整 CI。
+- [x] 完整 CI：GitHub Actions run `40832094755` 的 Backend 与 Frontend 均通过。
