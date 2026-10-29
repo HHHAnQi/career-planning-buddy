@@ -1,6 +1,6 @@
 # Production Readiness P1：Pairwise Calibration 边界收敛
 
-> Status: implementing
+> Status: verified
 
 ## 目标
 
