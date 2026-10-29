@@ -7,4 +7,4 @@
 - [x] 保留 Graph checkpoint wrapper。
 - [x] 增加架构守卫。
 - [x] 聚焦回归：24 passed（架构、Stage 4 Tool、并行 Tool、Streaming、Checkpoint）。
-- [ ] 完整 CI。
+- [x] 完整 CI：GitHub Actions run `40833275488` 的 Backend 与 Frontend 均通过。
