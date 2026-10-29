@@ -31,6 +31,7 @@ business decisions.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid5
@@ -47,6 +48,7 @@ from app.models.eval import (
     EvalTrialPair,
 )
 from app.repositories.evals import EvalRepository
+from evals.v2.calibration_metrics import compute_calibration_status
 from evals.v2.contracts import canonical_sha256
 from evals.v2.pairwise import PositionVariant, build_pair
 from evals.v2.pairwise_review_surface import (
@@ -195,6 +197,113 @@ class CalibrationReportSnapshot:
     input_hash: str
     content_hash: str
     report_payload: dict[str, object]
+
+
+def compute_calibration_status_from_snapshots(
+    *,
+    sweeps: list[EvalPairwiseSweep],
+    judge_result_snapshot: list[dict[str, object]],
+    annotation_snapshot: list[dict[str, object]],
+) -> dict[str, object]:
+    """Compute report metrics from frozen Judge and annotation snapshots."""
+
+    primaries_by_pair: dict[str, set[str]] = defaultdict(set)
+    for annotation in annotation_snapshot:
+        if annotation.get("is_adjudication") or not annotation.get(
+            "normalized_winner"
+        ):
+            continue
+        primaries_by_pair[str(annotation["pair_id"])].add(
+            str(annotation["reviewer_id"])
+        )
+    valid_human_pair_count = sum(
+        1 for reviewers in primaries_by_pair.values() if len(reviewers) >= 2
+    )
+
+    position_pair_count = sum(sweep.position_pair_count for sweep in sweeps)
+    results_by_pair: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for judge_result in judge_result_snapshot:
+        results_by_pair[str(judge_result["pair_id"])].append(judge_result)
+    position_metric_sample_count = sum(
+        1
+        for results in results_by_pair.values()
+        if sum(
+            result.get("judge_run_status") == "completed"
+            and result.get("normalized_winner") is not None
+            for result in results
+        )
+        >= 2
+    )
+
+    judge_winner_by_pair: dict[str, str] = {}
+    for judge_result in judge_result_snapshot:
+        if (
+            judge_result.get("judge_run_status") == "completed"
+            and judge_result.get("normalized_winner") is not None
+        ):
+            judge_winner_by_pair.setdefault(
+                str(judge_result["pair_id"]),
+                str(judge_result["normalized_winner"]),
+            )
+
+    human_label_by_pair: dict[str, str] = {}
+    for pair_id, reviewers in primaries_by_pair.items():
+        if len(reviewers) < 2:
+            continue
+        labels = [
+            str(annotation["normalized_winner"])
+            for annotation in annotation_snapshot
+            if str(annotation["pair_id"]) == pair_id
+            and not annotation.get("is_adjudication")
+            and annotation.get("normalized_winner")
+        ]
+        if labels:
+            human_label_by_pair[pair_id] = Counter(labels).most_common(1)[0][0]
+
+    common_pairs = sorted(set(judge_winner_by_pair) & set(human_label_by_pair))
+    agreement: float | None = None
+    if common_pairs:
+        agreement = sum(
+            judge_winner_by_pair[pair_id] == human_label_by_pair[pair_id]
+            for pair_id in common_pairs
+        ) / len(common_pairs)
+
+    decisive_verdicts_by_pair: dict[str, set[str]] = defaultdict(set)
+    for judge_result in judge_result_snapshot:
+        winner = judge_result.get("normalized_winner")
+        if (
+            judge_result.get("judge_run_status") == "completed"
+            and winner in ("baseline", "candidate")
+        ):
+            decisive_verdicts_by_pair[str(judge_result["pair_id"])].add(
+                str(winner)
+            )
+    position_bias: float | None = None
+    decisive_count = sum(
+        bool(verdicts) for verdicts in decisive_verdicts_by_pair.values()
+    )
+    if decisive_count:
+        position_bias = sum(
+            len(verdicts) >= 2
+            for verdicts in decisive_verdicts_by_pair.values()
+        ) / decisive_count
+
+    outcome = compute_calibration_status(
+        agreement=agreement,
+        position_bias=position_bias,
+        valid_human_pair_count=valid_human_pair_count,
+        position_pair_count=position_metric_sample_count,
+    )
+    return {
+        "calibration_status": outcome.calibration_status,
+        "usage_mode": outcome.usage_mode,
+        "agreement": agreement,
+        "position_bias": position_bias,
+        "valid_human_pair_count": valid_human_pair_count,
+        "position_pair_count": position_pair_count,
+        "position_metric_sample_count": position_metric_sample_count,
+        "agreement_sample_count": len(common_pairs),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +735,108 @@ class PairwiseCalibrationService:
             )
 
     # --------------------- calibration report ---------------------------
+
+    async def generate_calibration_report(
+        self,
+        *,
+        dataset_id: str,
+        dataset_version: str,
+        sweep_ids: list[UUID],
+        calibration_policy_version: str,
+        requested_by: str,
+    ) -> tuple[str, EvalPairwiseCalibrationReport]:
+        """Validate inputs, batch-load snapshots, and persist one report."""
+
+        sweeps: list[EvalPairwiseSweep] = []
+        for sweep_id in sweep_ids:
+            sweep = await self._repo.get_sweep(sweep_id)
+            if sweep is None:
+                raise _not_found(
+                    "EVAL_SWEEP_NOT_FOUND",
+                    f"sweep {sweep_id} not found",
+                )
+            sweeps.append(sweep)
+
+        first = sweeps[0]
+        if any(
+            sweep.dataset_id != dataset_id
+            or sweep.dataset_version != dataset_version
+            for sweep in sweeps
+        ):
+            raise _conflict(
+                "EVAL_CALIBRATION_DATASET_MISMATCH",
+                "all sweeps must belong to the requested dataset identity",
+            )
+        if any(
+            sweep.judge_model_id != first.judge_model_id
+            or sweep.judge_prompt_version != first.judge_prompt_version
+            or sweep.judge_rubric_version != first.judge_rubric_version
+            for sweep in sweeps[1:]
+        ):
+            raise _conflict(
+                "EVAL_CALIBRATION_JUDGE_IDENTITY_MISMATCH",
+                "all sweeps must share the same judge identity",
+            )
+
+        judge_results = await self._repo.list_judge_results_by_comparison_groups(
+            [sweep.comparison_group_id for sweep in sweeps]
+        )
+        annotations = await self._repo.list_annotations_by_sweeps(sweep_ids)
+        judge_result_snapshot = [
+            {
+                "pair_id": str(result.pair_id),
+                "judge_run_id": str(result.judge_run_id),
+                "judge_result_id": str(result.id),
+                "judge_model_id": result.model_id,
+                "judge_run_status": result.judge_run_status,
+                "normalized_winner": result.normalized_winner,
+                "input_hash": result.input_hash,
+            }
+            for result in judge_results
+        ]
+        annotation_snapshot = [
+            {
+                "annotation_id": str(annotation.id),
+                "pair_id": str(annotation.pair_id),
+                "reviewer_id": annotation.reviewer_id,
+                "reviewer_role": annotation.reviewer_role,
+                "is_adjudication": annotation.is_adjudication,
+                "normalized_winner": annotation.normalized_winner,
+                "position_variant": annotation.position_variant,
+                "submission_hash": annotation.submission_hash,
+                "review_input_hash": annotation.review_input_hash,
+            }
+            for annotation in annotations
+        ]
+        metrics = compute_calibration_status_from_snapshots(
+            sweeps=sweeps,
+            judge_result_snapshot=judge_result_snapshot,
+            annotation_snapshot=annotation_snapshot,
+        )
+        report_payload: dict[str, object] = {
+            "sweep_ids": [str(sweep_id) for sweep_id in sweep_ids],
+            "judge_result_count": len(judge_result_snapshot),
+            "annotation_count": len(annotation_snapshot),
+            "judge_model_id": first.judge_model_id,
+            "judge_prompt_version": first.judge_prompt_version,
+            "judge_rubric_version": first.judge_rubric_version,
+            **metrics,
+        }
+        return await self.create_or_reuse_calibration_report(
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            source_sha256=first.source_sha256,
+            judge_model_id=first.judge_model_id,
+            judge_prompt_version=first.judge_prompt_version,
+            judge_rubric_version=first.judge_rubric_version,
+            annotation_schema_version=first.annotation_schema_version,
+            calibration_policy_version=calibration_policy_version,
+            sweep_ids=sweep_ids,
+            judge_result_snapshot=judge_result_snapshot,
+            annotation_snapshot=annotation_snapshot,
+            report_payload=report_payload,
+            requested_by=requested_by,
+        )
 
     async def create_or_reuse_calibration_report(
         self,

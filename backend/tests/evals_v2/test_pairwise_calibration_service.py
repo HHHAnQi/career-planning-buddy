@@ -534,6 +534,28 @@ async def test_calibration_report_integrity_violation_on_content_mismatch(
     assert err.code == "EVAL_CALIBRATION_INTEGRITY_VIOLATION"
 
 
+@pytest.mark.asyncio
+async def test_generate_calibration_report_rejects_dataset_mismatch(
+    db_session: AsyncSession,
+) -> None:
+    sweep = await _repo_make_sweep(db_session, requested_pair_count=1)
+    sweep.dataset_id = "other-dataset"
+    async with session_transaction(db_session):
+        await EvalRepository(db_session).create_sweep(sweep)
+
+    with pytest.raises(PairwiseCalibrationError) as error:
+        await PairwiseCalibrationService(db_session).generate_calibration_report(
+            dataset_id="ds",
+            dataset_version="v1",
+            sweep_ids=[sweep.id],
+            calibration_policy_version="v1",
+            requested_by="r1",
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.code == "EVAL_CALIBRATION_DATASET_MISMATCH"
+
+
 # ===========================================================================
 # materialize_sweep_items happy path
 # ===========================================================================
