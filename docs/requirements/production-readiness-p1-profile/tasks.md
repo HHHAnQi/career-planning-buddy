@@ -6,8 +6,8 @@
 - [x] `PlanningContextService` 复用现有 `ProfileRepository`。
 - [x] 增加 Service 不直接查询 ORM 的架构守卫。
 - [x] 聚焦 Ruff 与 Mypy 通过。
-- [ ] 聚焦 Pytest 通过。
-- [ ] 远程 CI 通过。
+- [x] 聚焦 Pytest 由远程锁定依赖环境验证通过。
+- [x] 远程 CI 通过。
 
 ## 影响
 
@@ -21,4 +21,6 @@
 - Ruff：通过；
 - 定向 Mypy：通过；
 - 全量 Mypy/Pytest：本机 `cp` 环境缺少锁定依赖 `pypdf`，
-  尚未作为通过证据；由远程 CI 的锁定依赖环境继续验证。
+  未作为通过证据；
+- 远程 CI：GitHub Actions run `40846484054` 的 Backend 与 Frontend 全部通过；
+- 被验证提交：`83f6704b1b3fc6538f76bba676f78a0060c41d52`。
