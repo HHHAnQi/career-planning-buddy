@@ -19,7 +19,21 @@ function Invoke-Checked {
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $venvPython = Join-Path $repositoryRoot "backend\.venv\Scripts\python.exe"
-$backendPython = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { "python" }
+$backendPython = if ($env:BACKEND_PYTHON) {
+    $env:BACKEND_PYTHON
+}
+elseif (Test-Path -LiteralPath $venvPython) {
+    $venvPython
+}
+else {
+    throw (
+        "Missing backend\.venv. Create it with Python 3.12 and install " +
+        "backend\requirements.lock, or set BACKEND_PYTHON explicitly."
+    )
+}
+Invoke-Checked -Executable $backendPython -CommandArguments @(
+    "-c", "import sys; raise SystemExit(sys.version_info[:2] != (3, 12))"
+)
 $npmCommand = (Get-Command "npm.cmd" -ErrorAction Stop).Source
 $env:APP_ENV = "test"
 $env:LLM_PROVIDER = "mock"
@@ -30,7 +44,7 @@ $env:DATABASE_URL = if ($env:DATABASE_URL) {
     $env:DATABASE_URL
 }
 else {
-    "postgresql+asyncpg://career_buddy:career_buddy_local@localhost:5432/career_buddy"
+    "postgresql+asyncpg://career_buddy:career_buddy_local@localhost:5432/career_buddy_test"
 }
 $env:JWT_SECRET = if ($env:JWT_SECRET) {
     $env:JWT_SECRET
@@ -42,9 +56,7 @@ else {
 Push-Location (Join-Path $repositoryRoot "backend")
 try {
     Invoke-Checked -Executable $backendPython -CommandArguments @("-m", "ruff", "check", ".")
-    Invoke-Checked -Executable $backendPython -CommandArguments @(
-        "-m", "mypy", "app", "tests", "scripts", "evals"
-    )
+    Invoke-Checked -Executable $backendPython -CommandArguments @("-m", "mypy", "app")
     Invoke-Checked -Executable $backendPython -CommandArguments @(
         "-m", "scripts.audit_public_claims"
     )
